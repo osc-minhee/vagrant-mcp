@@ -1,0 +1,15 @@
+---
+# Vagrant box 의 vagrant 계정은 비밀번호 없이 sudo 가 가능하다.
+ansible_become: yes
+ansible_become_method: sudo
+
+common_packages:
+  - python3
+  - python3-pip
+  - ca-certificates
+  - curl
+  - wget
+  - vim
+  - git
+  - net-tools
+  - htop

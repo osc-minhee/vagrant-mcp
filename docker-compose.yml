@@ -1,10 +1,14 @@
 services:
-  vagrant-mcp:
+  vagrant-provisioner:
     build: .
-    container_name: vagrant-mcp
-    restart: always
-    env_file: .env          
+    container_name: vagrant-provisioner
     ports:
       - "8000:8000"
+    environment:
+      - TZ=Asia/Seoul
+    env_file:
+      - ./secrets/.env
     volumes:
-      - ${SSH_KEY_HOST_PATH:-~/.ssh/vagrant_mcp}:/app/ssh_key:ro
+      - ./data:/app/data
+      - ./secrets:/app/secrets
+    restart: unless-stopped

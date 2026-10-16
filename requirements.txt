@@ -1,0 +1,9 @@
+mcp>=1.12,<2
+fastapi
+fastapi-mcp>=0.4,<0.5
+uvicorn
+aiosqlite
+ansible
+paramiko
+jinja2
+pydantic
