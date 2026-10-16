@@ -1,0 +1,112 @@
+# mcp_server/core/hosts.py
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from mcp_server.core import redact
+from mcp_server.core.constants import PROJECT_PATTERN
+from mcp_server.core.executor.runner import CommandRunner, build_runner
+from mcp_server.utils import expand_ip_range, get_env_int
+
+logger = logging.getLogger(__name__)
+
+# 단일 호스트 설정(VAGRANT_HOST 등)을 쓸 때 붙는 이름
+DEFAULT_HOST_NAME = "default"
+DEFAULT_WORKDIR = "~/vagrant-mcp"
+
+@dataclass
+class VagrantHost:
+    """
+    Vagrant 가 설치된 호스트 한 대의 접속 정보와 할당 설정.
+    """
+    name: str
+    runner: CommandRunner
+    workdir: str
+    ip_pool: List[str] = field(default_factory=list)
+    bridge: Optional[str] = None
+    # vg_create_vm 에서 project 를 비웠을 때 쓰는 프로젝트 폴더. 없으면 workdir 바로 아래에 만든다.
+    default_project: Optional[str] = None
+
+def _ip_pool(entry: Dict[str, Any]) -> List[str]:
+    specs = entry.get("ip_ranges") or entry.get("ip_range") or []
+    if isinstance(specs, str):
+        specs = [specs]
+    return expand_ip_range(",".join(str(s) for s in specs))
+
+def _entries_from_env() -> List[Dict[str, Any]]:
+    """
+    VAGRANT_HOSTS(JSON 배열)가 있으면 그것을, 없으면 기존 단일 호스트 환경변수(VAGRANT_HOST 등)를 쓴다.
+    """
+    raw = os.getenv("VAGRANT_HOSTS", "").strip()
+    if not raw:
+        return [{
+            "name": DEFAULT_HOST_NAME,
+            "address": os.getenv("VAGRANT_HOST", "local"),
+            "user": os.getenv("VAGRANT_SSH_USER", "vagrant"),
+            "port": get_env_int("VAGRANT_SSH_PORT", 22),
+            "workdir": os.getenv("VAGRANT_WORKDIR", DEFAULT_WORKDIR),
+            "ip_range": os.getenv("VAGRANT_IP_RANGE", ""),
+            "bridge": os.getenv("VAGRANT_BRIDGE") or None,
+        }]
+
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"VAGRANT_HOSTS 가 올바른 JSON 이 아닙니다 (값은 한 줄이어야 합니다): {e}") from e
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("VAGRANT_HOSTS 는 비어 있지 않은 JSON 배열이어야 합니다.")
+    return entries
+
+def load_hosts() -> Dict[str, VagrantHost]:
+    """
+    호스트 설정을 읽어 {이름(소문자): VagrantHost} 로 돌려준다. 입력 순서가 유지되며 첫 번째가 기본 호스트다.
+    설정이 잘못되었으면 서버를 시작할 때 바로 알 수 있도록 ValueError 를 낸다.
+    """
+    hosts: Dict[str, VagrantHost] = {}
+    redact.reset()
+
+    for i, entry in enumerate(_entries_from_env()):
+        if not isinstance(entry, dict) or not entry.get("name") or not entry.get("address"):
+            raise ValueError(f"VAGRANT_HOSTS[{i}] 에는 name 과 address 가 필요합니다.")
+
+        name = str(entry["name"]).strip()
+        if name.lower() in hosts:
+            raise ValueError(f"VAGRANT_HOSTS 에 같은 이름의 호스트가 둘 이상 있습니다: {name}")
+
+        try:
+            ip_pool = _ip_pool(entry)
+            port = int(entry.get("port", 22))
+        except ValueError as e:
+            raise ValueError(f"VAGRANT_HOSTS 의 '{name}' 설정이 올바르지 않습니다: {e}") from e
+
+        # 호스트별 default_project 가 없으면 전체 기본값(VAGRANT_DEFAULT_PROJECT)을 쓴다.
+        default_project = str(entry.get("default_project") or os.getenv("VAGRANT_DEFAULT_PROJECT") or "").strip() or None
+        if default_project and not re.fullmatch(PROJECT_PATTERN, default_project):
+            raise ValueError(
+                f"VAGRANT_HOSTS 의 '{name}' 의 default_project 가 올바르지 않습니다: {default_project!r} "
+                "(영문/숫자/._- 만, 한 단계 폴더 이름)"
+            )
+
+        hosts[name.lower()] = VagrantHost(
+            name=name,
+            runner=build_runner(
+                address=str(entry["address"]),
+                user=entry.get("user") or "vagrant",
+                port=port,
+                key_path=entry.get("ssh_key") or None,
+                password=entry.get("ssh_password") or None,
+            ),
+            workdir=(entry.get("workdir") or DEFAULT_WORKDIR).rstrip("/") or "/",
+            ip_pool=ip_pool,
+            bridge=entry.get("bridge") or None,
+            default_project=default_project,
+        )
+
+        # 응답(오류 메시지 등)에서 이 호스트의 주소, 경로, 계정명을 가리기 위해 등록한다.
+        redact.register_host(name, str(entry["address"]), hosts[name.lower()].workdir, entry.get("user") or "vagrant")
+
+    logger.info(f"Vagrant 호스트 {len(hosts)}대 로드: {', '.join(h.name for h in hosts.values())}")
+    return hosts

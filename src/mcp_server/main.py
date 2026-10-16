@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from mcp_server.api.mcp_router import router as mcp_router
 
 # Database
+from mcp_server.core.redact import redact_text
 from mcp_server.database import init_db
 from mcp_server.utils import get_env_int
 
@@ -33,12 +34,12 @@ app = FastAPI(
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     # 잘못된 요청(없는 리소스 등)은 원인을 그대로 돌려줘 Client(LLM)가 바로잡을 수 있게 한다.
-    return JSONResponse(status_code=400, content={"success": False, "message": str(exc)})
+    return JSONResponse(status_code=400, content={"success": False, "message": redact_text(str(exc))})
 
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(request: Request, exc: RuntimeError):
     # 작업 중이라 거절, IP 소진 등 의도한 안내 메시지
-    return JSONResponse(status_code=409, content={"success": False, "message": str(exc)})
+    return JSONResponse(status_code=409, content={"success": False, "message": redact_text(str(exc))})
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):

@@ -111,27 +111,34 @@ class SSHRunner(CommandRunner):
         finally:
             client.close()
 
-def build_runner_from_env() -> CommandRunner:
+def build_runner(
+    address: str,
+    user: str = "vagrant",
+    port: int = 22,
+    key_path: Optional[str] = None,
+    password: Optional[str] = None,
+) -> CommandRunner:
     """
-    환경변수로 실행 위치를 정한다.
-    VAGRANT_HOST 가 비어 있거나 'local' 이면 LocalRunner, 아니면 SSHRunner.
+    address 가 비어 있거나 'local' 이면 LocalRunner, 아니면 SSHRunner.
+    key_path 를 주지 않으면 SECRETS_DIR/.ssh/host_key 를 (있을 때) 쓴다.
+    접속 제한 시간과 호스트 키 검증 여부는 모든 호스트가 같은 환경변수를 쓴다.
     """
-    host = os.getenv("VAGRANT_HOST", "local").strip()
-    if not host or host == "local":
+    address = (address or "local").strip()
+    if address == "local":
         logger.info("Vagrant 명령을 로컬에서 실행합니다.")
         return LocalRunner()
 
-    key_path = os.getenv("VAGRANT_SSH_KEY") or str(SECRETS_DIR / ".ssh" / "host_key")
+    key_path = key_path or os.getenv("VAGRANT_SSH_KEY") or str(SECRETS_DIR / ".ssh" / "host_key")
     if not os.path.exists(key_path):
         key_path = None
 
-    logger.info(f"Vagrant 명령을 원격 호스트({host})에서 SSH 로 실행합니다.")
+    logger.info(f"Vagrant 명령을 원격 호스트({address})에서 SSH 로 실행합니다.")
     return SSHRunner(
-        host=host,
-        user=os.getenv("VAGRANT_SSH_USER", "vagrant"),
-        port=get_env_int("VAGRANT_SSH_PORT", 22),
+        host=address,
+        user=user,
+        port=port,
         key_path=key_path,
-        password=os.getenv("VAGRANT_SSH_PASSWORD") or None,
+        password=password or os.getenv("VAGRANT_SSH_PASSWORD") or None,
         connect_timeout=get_env_int("VAGRANT_SSH_TIMEOUT", 10),
         strict_host_key=os.getenv("VAGRANT_SSH_STRICT_HOST_KEY", "false").lower() == "true",
     )

@@ -9,6 +9,9 @@ APP_DIR = Path(os.getenv("APP_DIR", Path(__file__).resolve().parents[2]))
 # .env, SSH 키 등 Secret 파일 위치
 SECRETS_DIR = Path(os.getenv("SECRETS_DIR", APP_DIR / "secrets"))
 
+# VM 폴더가 들어갈 프로젝트 폴더 이름. 호스트의 경로로 쓰이므로 한 단계(슬래시 없음)로만 허용한다.
+PROJECT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
 class ResourceState(str, Enum):
     """
     리소스의 LIFECYCLE 상태 정의
