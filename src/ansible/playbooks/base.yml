@@ -1,0 +1,64 @@
+---
+- name: "샌드박스 서버 기초 환경 설정"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  # 예제 playbook 은 Debian/Ubuntu box(apt) 기준이다.
+  pre_tasks:
+    - name: "지원 OS 확인"
+      assert:
+        that: ansible_os_family == "Debian"
+        fail_msg: "base.yml 은 Debian/Ubuntu 계열만 지원합니다 (현재: {{ ansible_distribution }})."
+  
+  tasks:
+    - name: "APT 캐시 업데이트"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: "시스템 패키지 업그레이드 (Optional)"
+      apt:
+        upgrade: dist
+      when: upgrade_system | default(false)
+
+    - name: "필수 공통 패키지 설치"
+      apt:
+        name: "{{ common_packages }}"
+        state: present
+      register: apt_result
+
+    - name: "Vim을 기본 편집기로 설정"
+      alternatives:
+        name: editor
+        path: /usr/bin/vim.basic
+
+    - name: "타임존 설정 (Asia/Seoul)"
+      timezone:
+        name: Asia/Seoul
+
+    - name: "ko_KR.UTF-8 로케일 생성"
+      locale_gen:
+        name: ko_KR.UTF-8
+        state: present
+
+    - name: "시스템 기본 로케일을 ko_KR.UTF-8로 설정"
+      debconf:
+        name: locales
+        question: locales/default_environment_locale
+        value: ko_KR.UTF-8
+        vtype: select
+
+    - name: "에러 메시지를 영어로 설정"
+      lineinfile:
+        path: /etc/default/locale
+        line: 'LC_MESSAGES="en_US.UTF-8"'
+        regexp: '^LC_MESSAGES='
+
+    - name: "로케일 설정 즉시 적용"
+      shell: update-locale LANG=ko_KR.UTF-8
+
+    - name: "기본 패키지 설치 결과 출력"
+      debug:
+        msg: "설치된 패키지: {{ common_packages }}"
+      when: apt_result.changed
