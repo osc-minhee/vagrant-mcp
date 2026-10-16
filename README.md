@@ -130,6 +130,62 @@ VAGRANT_BOX="ubuntu/jammy64"
 # VAGRANT_SKIP_ANSIBLE=false           # true 면 Ansible 환경 구성을 건너뜀
 ```
 
+#### 여러 호스트 사용
+
+호스트가 2대 이상이면 `VAGRANT_HOST` 계열 변수 대신 `VAGRANT_HOSTS` 에 JSON 배열을 **한 줄**로 넣습니다. `VAGRANT_HOSTS` 가 있으면 `VAGRANT_HOST`, `VAGRANT_WORKDIR`, `VAGRANT_IP_RANGE`, `VAGRANT_BRIDGE` 는 읽지 않습니다.
+
+```
+VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdir":"/home/oscka/server-workspace","ip_ranges":["192.168.0.60-89"],"bridge":"eno1"},{"name":"host-b","address":"192.168.0.11","user":"oscka","workdir":"/home/oscka/server-workspace","ip_ranges":["192.168.0.90-119"],"bridge":"enp5s0"}]'
+```
+
+| 키 | 설명 |
+| :--- | :--- |
+| `name`, `address` | **필수.** 호스트 이름(`vg_create_vm` 의 `host` 값), 접속 주소 (`local` 이면 같은 머신) |
+| `user`, `port` | SSH 계정(기본 `vagrant`), 포트(기본 22) |
+| `workdir` | VM 폴더를 만들 경로 (기본 `~/vagrant-mcp`) |
+| `default_project` | `vg_create_vm` 에서 `project` 를 비웠을 때 쓸 프로젝트 폴더 (예: `openwebui`). 없으면 `VAGRANT_DEFAULT_PROJECT`, 그것도 없으면 workdir 바로 아래 |
+| `ip_ranges` | VM 에 줄 고정 IP 대역 목록. 호스트끼리 겹치지 않게 지정 |
+| `bridge` | 브리지할 호스트 NIC 이름 |
+| `ssh_key`, `ssh_password` | 호스트별 접속 인증 (없으면 공통 설정) |
+
+- 첫 번째 호스트가 기본 호스트입니다. 호스트 기록이 없는 기존 VM 은 첫 번째 호스트에 있는 것으로 봅니다.
+- 호스트가 1대면 `vg_create_vm` 에서 `host` 를 비워도 되고, 2대 이상이면 반드시 지정해야 합니다. 지정하지 않으면 사용 가능한 호스트 목록이 담긴 오류가 반환됩니다.
+- VM 이름은 호스트와 상관없이 전체에서 유일해야 합니다. 변경/삭제는 VM 이 생성된 호스트에서 실행됩니다.
+- IP 는 선택한 호스트의 `ip_ranges` 에서 DB 에 없고 그 호스트에서 ping 응답이 없는 것을 고릅니다. 동시 실행 수(`VAGRANT_MAX_PARALLEL`)는 호스트마다 적용됩니다.
+
+#### 프로젝트 폴더
+
+VM 은 `{workdir}/{project}/vg-<이름>` 에 만들어집니다. `project` 는 `vg_create_vm` 에서 사용자가 지정하고(영문/숫자/`._-`, 한 단계), 비우면 호스트의 `default_project` → `VAGRANT_DEFAULT_PROJECT` 순으로 씁니다. 둘 다 없으면 `{workdir}/vg-<이름>` 입니다. 생성 때 정해진 project 는 DB 에 기록되어 변경과 삭제가 같은 경로를 쓰므로, 이후에 기본값을 바꿔도 기존 VM 의 경로는 그대로입니다.
+
+#### 응답에서 내부 정보 가리기
+
+LLM(Client)으로 나가는 오류 메시지(호스트 접속 실패, 생성 거절, `last_error`, 오류 응답)는 [redact.py](./src/mcp_server/core/redact.py) 로 내부 정보를 가립니다. 서버 로그와 DB 에는 원문이 남습니다.
+
+| 가리는 것 | 표시 |
+| :--- | :--- |
+| 호스트 접속 주소(`address` 의 IP/도메인), 그 앞의 `user@` | `<host-addr:호스트이름>`, `***@` |
+| 호스트의 `workdir` | `<workdir:호스트이름>` (뒤의 프로젝트/VM 폴더 이름은 그대로) |
+| 그 밖의 `/home/<계정>`, `/Users/<계정>` | `/home/***` |
+| 호스트의 SSH 계정명 (`vagrant`, `root`, `ubuntu` 등 흔한 이름은 제외) | `***` |
+| `password`/`token`/`secret`/`api_key` 뒤의 값, PRIVATE KEY 블록 | `***`, `<PRIVATE KEY 숨김>` |
+
+- `vg_list_hosts` 응답에는 `workdir` 를 넣지 않습니다.
+- VM 의 IP 와 호스트 이름은 가리지 않습니다 (사용자에게 알려 줘야 합니다). VM IP 는 LiteLLM 등 앞단에서 가리세요.
+
+#### 생성 전 자원 확인
+
+`vg_create_vm` 은 VM 을 만들기 전에 호스트에 SSH 로 접속해 자원을 확인하고, 부족하면 이유와 그 호스트에서 가능한 사양을 오류로 알려 주며 거절합니다. 기준은 느슨합니다.
+
+| 항목 | 기준 | 설정 |
+| :--- | :--- | :--- |
+| 메모리 | 가용 메모리(`MemAvailable`) ≥ 요청 사양 + 예비 | `VAGRANT_HOST_MEM_RESERVE_MB` (기본 512) |
+| 디스크 | `workdir` 여유 ≥ 최소 여유 | `VAGRANT_MIN_DISK_FREE_MB` (기본 5120) |
+| CPU | 확인하지 않음 | |
+
+- 호스트에 접속하지 못하면 생성하지 않고 원인을 알려 줍니다. 접속은 되는데 수치를 읽지 못하는 호스트(`/proc` 이 없는 OS 등)는 막지 않습니다.
+- 실행 중인 VM 의 할당 합계(오버커밋)는 따지지 않고, 이 서버가 방금 시작시킨 VM 은 아직 가용 메모리에 반영되지 않을 수 있습니다. 연달아 여러 대를 요청하면 기준을 넘길 수 있습니다.
+- `VAGRANT_RESOURCE_CHECK=false` 로 끌 수 있습니다. 변경(`vg_update_vm`)에는 적용되지 않습니다.
+
 flavor 별 사양은 [vm.py](./src/mcp_server/provisioners/vagrant/vm.py) 의 `FLAVOR_SPECS` 에 정의되어 있습니다.
 
 | flavor | vCPU | 메모리 |
@@ -158,10 +214,11 @@ cd src && SECRETS_DIR=../secrets python -m mcp_server.main
 
 | Tool | 설명 |
 | :--- | :--- |
-| `vg_create_vm` | VM 1대 생성 (name, flavor, purpose). 백그라운드로 진행 |
+| `vg_list_hosts` | 호스트 목록과 자원 현황(CPU, 메모리, 디스크, VirtualBox 실행 현황), 이 서버가 만든 VM 수, 남은 IP 수 조회. 접속 실패 호스트는 `reachable=false` |
+| `vg_create_vm` | VM 1대 생성 (name, flavor, purpose, host, project). 호스트가 2대 이상이면 host 지정, project 를 비우면 호스트의 기본 프로젝트. 자원이 부족하면 거절. 백그라운드로 진행 |
 | `vg_update_vm` | 사양/용도 변경. 실행 중이면 `vagrant reload` 로 재시작 |
 | `vg_destroy_vm` | `vagrant destroy -f` 후 VM 폴더 삭제 |
-| `vg_list_vm` | VM 목록, 상태, IP, 사양, 오류 원인 조회 |
+| `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 |
 
 ```markdown
 # User Prompt(VM 생성)
