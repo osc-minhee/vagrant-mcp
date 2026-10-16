@@ -1,0 +1,14 @@
+# 비밀 값 (SSH 비밀번호/키 경로 등)
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+
+*.zip
+test_client.py

@@ -1,0 +1,10 @@
+.venv
+.env
+.git
+**/__pycache__
+**/*.pyc
+*.zip
+test_client.py
+.env.*
+build
+**/*.egg-info

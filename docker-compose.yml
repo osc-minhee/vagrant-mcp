@@ -1,0 +1,10 @@
+services:
+  vagrant-mcp:
+    build: .
+    container_name: vagrant-mcp
+    restart: always
+    env_file: .env          # VAGRANT_MCP_HOSTS, VAGRANT_MCP_SSH_PASSWORD 등
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${SSH_KEY_HOST_PATH:?.env 에 SSH_KEY_HOST_PATH(호스트의 SSH 키 경로)를 지정하세요}:/app/ssh_key:ro
