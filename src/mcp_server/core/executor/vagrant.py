@@ -2,14 +2,16 @@
 import asyncio
 import base64
 import logging
+import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from mcp_server.core.executor.base import ExecResult, InfraExecutor
+from mcp_server.core.executor.base import ExecResult, InfraExecutor, VerifyResult
 from mcp_server.core.executor.runner import sh_path
 from mcp_server.core.hosts import VagrantHost
+from mcp_server.core.redact import redact_text
 
 # 리소스마다 {호스트 workdir}/{resource_id} 폴더를 만들고 그 안에 Vagrantfile 을 둔다.
 # 이미 실행 중이면 reload(사양 변경 반영), 아니면 up(최초 생성 또는 기동).
@@ -57,6 +59,71 @@ fi
 true
 """
 
+# 호스트에서 사용 중인 IP 를 찾는다. (읽기 전용)
+#  VF=<ip>    : scan_root 아래 Vagrantfile 에 적힌 고정 IP (꺼진 VM, 다른 사람이 만든 VM 포함. 주석 줄도 보수적으로 포함)
+#  VB=<ip>    : SSH 계정으로 실행 중인 VirtualBox VM 의 게스트 IP (Guest Additions 가 있어야 보인다)
+#  NOROOT=1   : scan_root 폴더가 없음
+_SCAN_IPS_SCRIPT = r"""
+ROOT=__ROOT__
+if [ -d "$ROOT" ]; then
+  find "$ROOT" -maxdepth 6 \( -name .vagrant -o -name .git -o -name node_modules \) -prune -o -name Vagrantfile -type f -print0 2>/dev/null \
+    | xargs -0 -r grep -hoE "ip:[[:space:]]*[\"'][0-9]+(\.[0-9]+){3}[\"']" 2>/dev/null \
+    | grep -oE '[0-9]+(\.[0-9]+){3}' | sed 's/^/VF=/'
+else
+  echo "NOROOT=1"
+fi
+if command -v VBoxManage >/dev/null 2>&1; then
+  for id in $(VBoxManage list runningvms 2>/dev/null </dev/null | sed -n 's/.*{\(.*\)}$/\1/p'); do
+    VBoxManage guestproperty enumerate "$id" 2>/dev/null </dev/null \
+      | grep -oE '/V4/IP[^0-9]*[0-9]+(\.[0-9]+){3}' | grep -oE '[0-9]+(\.[0-9]+){3}$' | sed 's/^/VB=/'
+  done
+fi
+true
+"""
+
+# 생성/변경 후 확인: VirtualBox 에서 VM(vb.name = resource_id)의 상태와, 호스트에서 VM IP 로 ping 이 되는지
+_VERIFY_UP_SCRIPT = r"""
+command -v VBoxManage >/dev/null 2>&1 || { echo "호스트에 VBoxManage 가 없습니다." >&2; exit 23; }
+ST="$(VBoxManage showvminfo __NAME__ --machinereadable 2>/dev/null </dev/null | sed -n 's/^VMState="\(.*\)"$/\1/p')"
+echo "STATE=${ST:-missing}"
+IP=__IP__
+if [ -n "$IP" ]; then
+  ok=0
+  for i in 1 2 3 4 5; do ping -c1 -W2 "$IP" >/dev/null 2>&1 && { ok=1; break; }; sleep 3; done
+  echo "PING=$ok"
+fi
+"""
+
+# 삭제 후 확인: VM 폴더와 VirtualBox VM 이 모두 없어야 한다
+_VERIFY_GONE_SCRIPT = r"""
+[ -e __DIR__ ] && echo "DIR=1" || echo "DIR=0"
+if command -v VBoxManage >/dev/null 2>&1; then
+  VBoxManage showvminfo __NAME__ >/dev/null 2>&1 </dev/null && echo "VM=1" || echo "VM=0"
+else
+  echo "VM=unknown"
+fi
+"""
+
+# 호스트의 VirtualBox 에 등록된 VM 목록 (SSH 계정의 VM 만 보인다). __ONLY__ 가 있으면 그 VM 하나만 본다. (읽기 전용)
+#  @@VM=<uuid> 로 VM 하나가 시작되고, 이어서 name/VMState/cpus/memory 와 IP=<게스트 IP> (실행 중 + Guest Additions) 가 온다.
+_LIST_VMS_SCRIPT = r"""
+command -v VBoxManage >/dev/null 2>&1 || { echo "호스트에 VBoxManage 가 없습니다." >&2; exit 23; }
+ONLY=__ONLY__
+if [ -n "$ONLY" ]; then
+  IDS="$ONLY"
+else
+  IDS="$(VBoxManage list vms 2>/dev/null </dev/null | sed -n 's/.*{\(.*\)}$/\1/p')"
+fi
+for id in $IDS; do
+  INFO="$(VBoxManage showvminfo "$id" --machinereadable 2>/dev/null </dev/null)" || continue
+  echo "@@VM=$id"
+  printf '%s\n' "$INFO" | grep -E '^(name|VMState|cpus|memory)='
+  VBoxManage guestproperty enumerate "$id" 2>/dev/null </dev/null \
+    | grep -oE '/V4/IP[^0-9]*[0-9]+(\.[0-9]+){3}' | grep -oE '[0-9]+(\.[0-9]+){3}$' | sed 's/^/IP=/'
+done
+true
+"""
+
 class HostInspectError(RuntimeError):
     """
     호스트에는 접속했지만 자원 조회 결과를 얻거나 해석하지 못했을 때 (접속 실패는 이 예외가 아니다).
@@ -78,7 +145,7 @@ class VagrantExecutor(InfraExecutor):
         if not hosts:
             raise ValueError("Vagrant 호스트가 하나 이상 필요합니다.")
         self.hosts = hosts
-        # 입력 순서상 첫 번째 호스트. vars 에 host 기록이 없는 기존 리소스는 이 호스트에 있는 것으로 본다.
+        # 입력 순서상 첫 번째 호스트
         self.default_host = next(iter(hosts.values()))
         self.template_path = template_path
         self.ssh_pubkey_paths = ssh_pubkey_paths
@@ -105,6 +172,24 @@ class VagrantExecutor(InfraExecutor):
         if not host:
             raise RuntimeError(f"호스트 '{name}' 설정을 찾을 수 없습니다. (사용 가능: {', '.join(h.name for h in self.hosts.values())})")
         return host
+
+    def host_of(self, vars: Dict[str, Any]) -> VagrantHost:
+        """
+        리소스가 있는 호스트. 생성 때 기록한 host 를 쓰고, 기록이 없는 기존 리소스는 IP 가 속한 ip_range 의 호스트로 찾는다.
+        (설정 순서에 기대지 않는다. 순서가 바뀌면 엉뚱한 호스트에서 삭제할 수 있다.) 찾지 못하거나 여러 곳이면 RuntimeError.
+        """
+        if vars.get("host"):
+            return self.host_for(vars["host"])
+        if len(self.hosts) == 1:
+            return self.default_host
+
+        ip = str(vars.get("ip") or "")
+        matches = [h for h in self.hosts.values() if ip and ip in h.ip_pool]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise RuntimeError(f"호스트 기록이 없고 IP({ip or '없음'})가 어느 호스트의 ip_ranges 에도 속하지 않아 호스트를 정할 수 없습니다.")
+        raise RuntimeError(f"호스트 기록이 없고 IP({ip})가 여러 호스트의 ip_ranges 에 속해 호스트를 정할 수 없습니다: {', '.join(h.name for h in matches)}")
 
     def _vm_dir(self, host: VagrantHost, resource_id: str, vars: Dict[str, Any]) -> str:
         # project 는 생성 때 vars 에 기록된다. 기록이 없는 기존 리소스는 workdir 바로 아래에 있다.
@@ -151,7 +236,7 @@ class VagrantExecutor(InfraExecutor):
         return success, out, err
 
     async def apply(self, resource_id: str, vars: Dict[str, Any]) -> ExecResult:
-        host = self.host_for(vars.get("host"))
+        host = self.host_of(vars)
         vagrantfile = self.render(resource_id, vars)
         script = (
             _APPLY_SCRIPT
@@ -161,7 +246,7 @@ class VagrantExecutor(InfraExecutor):
         return await self._run(host, resource_id, "up/reload", script)
 
     async def destroy(self, resource_id: str, vars: Dict[str, Any]) -> ExecResult:
-        host = self.host_for(vars.get("host"))
+        host = self.host_of(vars)
         script = _DESTROY_SCRIPT.replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
         return await self._run(host, resource_id, "destroy", script)
 
@@ -172,6 +257,107 @@ class VagrantExecutor(InfraExecutor):
         result = await host.runner.run(f"ping -c1 -W1 {ip} >/dev/null 2>&1", timeout=10)
         return result.exit_code == 0
 
+    @staticmethod
+    def _kv(text: str) -> Dict[str, str]:
+        values: Dict[str, str] = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key.strip()] = value.strip()
+        return values
+
+    async def verify_applied(self, resource_id: str, vars: Dict[str, Any]) -> VerifyResult:
+        """
+        VirtualBox 에서 VM 이 running 인지 확인한다. (아니면 실패)
+        VM IP 가 ping 에 응답하지 않으면 실패로 보지 않고 경고로 돌려준다. (bridge 설정이 틀린 경우가 많다)
+        """
+        host = self.host_of(vars)
+        ip = vars.get("ip") or ""
+        script = _VERIFY_UP_SCRIPT.replace("__NAME__", shlex.quote(resource_id)).replace("__IP__", shlex.quote(ip))
+        result = await host.runner.run(script, timeout=60)
+        if result.exit_code != 0:
+            return False, (redact_text(result.stderr.strip()) or f"확인 스크립트 실패 (exit={result.exit_code})")[:300]
+
+        values = self._kv(result.stdout)
+        state = values.get("STATE", "missing")
+        if state != "running":
+            return False, f"VirtualBox 에서 VM '{resource_id}' 의 상태가 '{state}' 입니다. (running 이어야 합니다)"
+        if values.get("PING") == "0":
+            return True, f"VM 은 실행 중이지만 IP {ip} 가 호스트에서 ping 에 응답하지 않습니다. 호스트의 bridge(NIC) 설정을 확인하세요."
+        return True, ""
+
+    async def verify_destroyed(self, resource_id: str, vars: Dict[str, Any]) -> VerifyResult:
+        """
+        VM 폴더와 VirtualBox VM 이 모두 사라졌는지 확인한다. 하나라도 남아 있으면 실패.
+        (폴더가 없어서 '이미 삭제됨' 으로 끝났는데 VM 은 실행 중인 경우를 잡는다. 예: workdir 설정이 바뀐 경우)
+        """
+        host = self.host_of(vars)
+        vm_dir = self._vm_dir(host, resource_id, vars)
+        script = _VERIFY_GONE_SCRIPT.replace("__DIR__", sh_path(vm_dir)).replace("__NAME__", shlex.quote(resource_id))
+        result = await host.runner.run(script, timeout=60)
+        values = self._kv(result.stdout)
+
+        if values.get("VM") == "1":
+            return False, (
+                f"VirtualBox 에 VM '{resource_id}' 가 아직 남아 있습니다. VM 폴더 경로({vm_dir})가 생성 때와 다를 수 있으니 "
+                "workdir/project 설정이 바뀌지 않았는지 확인하세요. 기록은 지우지 않았습니다."
+            )
+        if values.get("DIR") == "1":
+            return False, f"VM 폴더가 남아 있습니다: {vm_dir}"
+        if values.get("VM") != "0":
+            return True, "VBoxManage 가 없어 VirtualBox 에서 사라졌는지는 확인하지 못했습니다."
+        return True, ""
+
+    async def used_ips(self, host: VagrantHost) -> Dict[str, str]:
+        """
+        호스트에서 사용 중인 IP 를 {IP: 출처("vagrantfile" | "virtualbox")} 로 돌려준다. (읽기 전용)
+        접속 실패는 예외로 올라간다. scan_root 가 없으면 Vagrantfile 검색만 건너뛴다.
+        """
+        result = await host.runner.run(_SCAN_IPS_SCRIPT.replace("__ROOT__", sh_path(host.scan_root)), timeout=60)
+        if result.exit_code != 0:
+            raise HostInspectError(f"사용 중 IP 조회 실패 (exit={result.exit_code}): {redact_text(result.stderr.strip())[:200]}")
+
+        found: Dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            key, _, value = line.strip().partition("=")
+            if key == "NOROOT":
+                self.logger.warning(f"[{host.name}] scan_root({host.scan_root}) 폴더가 없어 Vagrantfile 의 IP 는 확인하지 못했습니다.")
+            elif key == "VF" and value:
+                found.setdefault(value, "vagrantfile")
+            elif key == "VB" and value:
+                found.setdefault(value, "virtualbox")
+        return found
+
+    async def list_vms(self, host: VagrantHost, only: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        호스트의 VirtualBox 에 등록된 VM 을 [{name, state, cpus, memory_mb, guest_ips}] 로 돌려준다. (읽기 전용)
+        only(VM 이름)를 주면 그 VM 만 보고, 없으면 빈 목록. 접속 실패는 예외로, VBoxManage 가 없으면 HostInspectError.
+        """
+        script = _LIST_VMS_SCRIPT.replace("__ONLY__", shlex.quote(only or ""))
+        result = await host.runner.run(script, timeout=120)
+        if result.exit_code != 0:
+            raise HostInspectError(f"VM 목록 조회 실패 (exit={result.exit_code}): {result.stderr.strip()[:200]}")
+
+        vms: List[Dict[str, Any]] = []
+        for line in result.stdout.splitlines():
+            key, sep, value = line.strip().partition("=")
+            if not sep:
+                continue
+            value = value.strip().strip('"')
+            if key == "@@VM":
+                vms.append({"name": value, "state": None, "cpus": None, "memory_mb": None, "guest_ips": []})
+            elif not vms:
+                continue
+            elif key == "name":
+                vms[-1]["name"] = value
+            elif key == "VMState":
+                vms[-1]["state"] = value
+            elif key in ("cpus", "memory") and value.isdigit():
+                vms[-1]["cpus" if key == "cpus" else "memory_mb"] = int(value)
+            elif key == "IP" and value not in vms[-1]["guest_ips"]:
+                vms[-1]["guest_ips"].append(value)
+        return vms
+
     async def inspect_host(self, host: VagrantHost) -> Dict[str, Any]:
         """
         호스트의 CPU/메모리/디스크 여유와 VirtualBox 실행 현황을 조회한다. (읽기 전용)
@@ -180,7 +366,7 @@ class VagrantExecutor(InfraExecutor):
         """
         result = await host.runner.run(_INSPECT_SCRIPT.replace("__WD__", sh_path(host.workdir)), timeout=30)
         if result.exit_code != 0:
-            raise HostInspectError(f"호스트 조회 실패 (exit={result.exit_code}): {result.stderr.strip()[:200]}")
+            raise HostInspectError(f"호스트 조회 실패 (exit={result.exit_code}): {redact_text(result.stderr.strip())[:200]}")
 
         values: Dict[str, str] = {}
         for line in result.stdout.splitlines():

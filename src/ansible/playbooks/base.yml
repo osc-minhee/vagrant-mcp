@@ -4,61 +4,131 @@
   become: yes
   gather_facts: yes
 
-  # 예제 playbook 은 Debian/Ubuntu box(apt) 기준이다.
+  # Debian/Ubuntu(apt) 와 RedHat 계열(Rocky, dnf)을 지원한다.
   pre_tasks:
     - name: "지원 OS 확인"
       assert:
-        that: ansible_os_family == "Debian"
-        fail_msg: "base.yml 은 Debian/Ubuntu 계열만 지원합니다 (현재: {{ ansible_distribution }})."
-  
+        that: ansible_os_family in ["Debian", "RedHat"]
+        fail_msg: "base.yml 은 Debian/Ubuntu, RedHat(Rocky) 계열만 지원합니다 (현재: {{ ansible_distribution }})."
+
   tasks:
+    # ---------- 패키지 ----------
     - name: "APT 캐시 업데이트"
       apt:
         update_cache: yes
         cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
 
-    - name: "시스템 패키지 업그레이드 (Optional)"
+    - name: "시스템 패키지 업그레이드 (Optional, Debian)"
       apt:
         upgrade: dist
-      when: upgrade_system | default(false)
+      when: ansible_os_family == "Debian" and (upgrade_system | default(false))
+
+    - name: "시스템 패키지 업그레이드 (Optional, RedHat)"
+      dnf:
+        name: "*"
+        state: latest
+      when: ansible_os_family == "RedHat" and (upgrade_system | default(false))
+
+    - name: "EPEL 저장소 설치 (htop 등, RedHat)"
+      dnf:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
 
     - name: "필수 공통 패키지 설치"
-      apt:
-        name: "{{ common_packages }}"
+      package:
+        name: "{{ common_packages + (common_packages_debian if ansible_os_family == 'Debian' else common_packages_redhat) }}"
         state: present
-      register: apt_result
+      register: package_result
 
-    - name: "Vim을 기본 편집기로 설정"
+    # ---------- 편집기 / 시간 / 로케일 ----------
+    - name: "Vim을 기본 편집기로 설정 (Debian)"
       alternatives:
         name: editor
         path: /usr/bin/vim.basic
+      when: ansible_os_family == "Debian"
+
+    - name: "Vim을 기본 편집기로 설정 (RedHat)"
+      copy:
+        dest: /etc/profile.d/editor.sh
+        content: |
+          export EDITOR=vim
+          export VISUAL=vim
+        mode: "0644"
+      when: ansible_os_family == "RedHat"
 
     - name: "타임존 설정 (Asia/Seoul)"
       timezone:
         name: Asia/Seoul
 
-    - name: "ko_KR.UTF-8 로케일 생성"
+    - name: "ko_KR.UTF-8 로케일 생성 (Debian)"
       locale_gen:
         name: ko_KR.UTF-8
         state: present
+      when: ansible_os_family == "Debian"
 
-    - name: "시스템 기본 로케일을 ko_KR.UTF-8로 설정"
+    - name: "시스템 기본 로케일을 ko_KR.UTF-8로 설정 (Debian)"
       debconf:
         name: locales
         question: locales/default_environment_locale
         value: ko_KR.UTF-8
         vtype: select
+      when: ansible_os_family == "Debian"
 
-    - name: "에러 메시지를 영어로 설정"
+    - name: "에러 메시지를 영어로 설정 (Debian)"
       lineinfile:
         path: /etc/default/locale
         line: 'LC_MESSAGES="en_US.UTF-8"'
         regexp: '^LC_MESSAGES='
+      when: ansible_os_family == "Debian"
 
-    - name: "로케일 설정 즉시 적용"
+    - name: "로케일 설정 즉시 적용 (Debian)"
       shell: update-locale LANG=ko_KR.UTF-8
+      when: ansible_os_family == "Debian"
+
+    - name: "시스템 로케일 설정 (RedHat): 기본 ko_KR.UTF-8, 에러 메시지는 영어"
+      copy:
+        dest: /etc/locale.conf
+        content: |
+          LANG=ko_KR.UTF-8
+          LC_MESSAGES=en_US.UTF-8
+        mode: "0644"
+      when: ansible_os_family == "RedHat"
+
+    # ---------- SSH 비밀번호 로그인 (내부망 테스트/시연용, group_vars 의 ssh_password_auth) ----------
+    # 브리지 네트워크라 같은 LAN 에서 누구나 접속을 시도할 수 있다. 외부에 노출되는 망에서는 끈다.
+    - name: "vagrant 계정 비밀번호 설정"
+      command: chpasswd
+      args:
+        stdin: "vagrant:{{ vm_password }}"
+      no_log: true
+      changed_when: true
+      when: ssh_password_auth | bool
+
+    # 'PasswordAuthentication no' 를 yes 로 바꾼다. Ubuntu box 는 본문이 아니라 sshd_config.d/60-cloudimg-settings.conf 에 no 가 있다.
+    # no 가 없는 OS(Rocky 등)는 기본값이 yes 라 바꿀 것이 없다.
+    - name: "SSH 비밀번호 로그인 허용 (PasswordAuthentication no -> yes)"
+      shell: |
+        shopt -s nullglob
+        files=$(grep -lE '^\s*PasswordAuthentication\s+no' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf || true)
+        [ -z "$files" ] && exit 0
+        sed -i -E 's/^\s*PasswordAuthentication\s+no/PasswordAuthentication yes/' $files
+        echo changed
+      args:
+        executable: /bin/bash
+      register: ssh_password_result
+      changed_when: "'changed' in ssh_password_result.stdout"
+      when: ssh_password_auth | bool
+      notify: restart sshd
 
     - name: "기본 패키지 설치 결과 출력"
       debug:
-        msg: "설치된 패키지: {{ common_packages }}"
-      when: apt_result.changed
+        msg: "설치된 패키지: {{ common_packages + (common_packages_debian if ansible_os_family == 'Debian' else common_packages_redhat) }}"
+      when: package_result.changed
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted

@@ -1,9 +1,10 @@
 # mcp_server/api/mcp/vagrant.py
-from fastapi import APIRouter
+from typing import Optional
+from fastapi import APIRouter, Query
 import mcp_server.provisioners  # noqa: F401  (Provisioner 를 Registry 에 등록)
-from mcp_server.core.constants import CloudProvider
+from mcp_server.core.constants import CloudProvider, ResourceState
 from mcp_server.core.registry import ProvisionerRegistry
-from mcp_server.schemas.vagrant import VagrantVMCreateInput, VagrantVMDestroyInput, VagrantVMUpdateInput
+from mcp_server.schemas.vagrant import NAME_PATTERN, VagrantVMCreateInput, VagrantVMDestroyInput, VagrantVMUpdateInput
 
 # Vagrant VM Tools
 router = APIRouter(tags=["vagrant"])
@@ -13,10 +14,13 @@ vg_vm = ProvisionerRegistry.get_provisioner(CloudProvider.VAGRANT, "vm")
     "Vagrant(VirtualBox)로 VM을 1개 생성하고 기초 환경을 구성하는 도구이다.\n"
     "생성은 백그라운드에서 진행되며 수 분이 걸린다. 진행 상태는 vg_list_vm 으로 확인한다.\n"
     "규칙:\n"
-    "1. 필수는 name(소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, project=호스트 기본 프로젝트.\n"
+    "1. 필수는 name(소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, image=ubuntu-22.04, project=호스트 기본 프로젝트.\n"
+    "   image 는 ubuntu-22.04, rocky-8, rocky-9 중 하나다 (사용자가 Rocky/CentOS 계열을 원하면 rocky-9).\n"
     "2. host 는 호스트가 1대면 비운다. 2대 이상이고 사용자가 말하지 않았으면 비워서 호출하고, 오류의 '사용 가능' 목록으로 한 번만 묻는다.\n"
     "3. 여러 대를 만들려면 반복 호출한다. 값을 지어내지 않는다.\n"
-    "4. 호스트 자원이 부족하면 이유와 가능한 사양이 오류로 온다. 그대로 전하고 더 작은 사양이나 다른 호스트를 제안한다."
+    "4. 호스트 자원이 부족하면 이유와 가능한 사양이 오류로 온다. 그대로 전하고 더 작은 사양이나 다른 호스트를 제안한다.\n"
+    "5. ip 는 사용자가 특정 IP 를 말했을 때만 넣는다. 호스트 IP 대역 안의 IP 만 쓸 수 있고, 대역 밖이거나 사용 중이면 이유(와 대역)가 오류로 온다. "
+    "그대로 전하고 다른 IP 를 받거나 비워서(자동 할당) 다시 호출한다."
 ))
 async def vg_create_vm(params: VagrantVMCreateInput):
     return await vg_vm.create(params)
@@ -42,14 +46,39 @@ async def vg_destroy_vm(params: VagrantVMDestroyInput):
     "Vagrant 호스트 목록과 각 호스트의 자원 현황을 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
     "사용자가 호스트 상태를 묻거나 어느 호스트에 만들지 고를 때만 호출한다. VM 생성 전에 매번 호출하지 않는다.\n"
     "호스트마다 CPU, 메모리/디스크(사용자에게는 *_gi 로 보여준다), vbox_*(실행 중인 VM 전체 합계), managed_vms(이 서버가 만든 VM 수), "
-    "ip_available(남은 IP 수)이 있고, 접속 실패는 reachable=false 와 error 로 온다."
+    "ip_available(남은 IP 수), ip_used_by_others(대역 안을 이 서버가 만들지 않은 VM 이 쓰는 수)가 있고, 접속 실패는 reachable=false 와 error 로 온다.\n"
+    "호스트에 있는 VM 하나하나를 보려면 vg_list_host_vms 를 쓴다."
 ))
 async def vg_list_hosts():
     return await vg_vm.list_hosts()
 
-@router.get("/vg_list_vm", operation_id="vg_list_vm", description=(
-    "이 서버가 Vagrant로 생성한 전체 VM 목록(host, project 포함)과 상태(PENDING, PROVISIONING, CONFIGURING, RUNNING, ERROR, DESTROYING)를 조회하는 도구이다.\n"
-    "ERROR 상태면 last_error 에 원인이 담겨 있다."
+@router.get("/vg_list_host_vms", operation_id="vg_list_host_vms", description=(
+    "호스트의 VirtualBox 에 있는 VM 전체(이 서버가 만들지 않은 VM 포함)와 상태(running, poweroff, saved, aborted 등)를 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
+    "managed=true 는 이 서버가 만든 VM 이고 managed_name 이 vg_* 도구에서 쓰는 이름이다. managed=false 인 VM 은 이 서버로 변경/삭제할 수 없다.\n"
+    "호스트가 1대면 host 를 비우고, 2대 이상이면 지정한다. 호스트의 SSH 계정으로 보이는 VM 만 나오며, guest_ips 는 실행 중이고 Guest Additions 가 있을 때만 보인다."
 ))
-async def vg_list_vm():
-    return await vg_vm.list_all()
+async def vg_list_host_vms(
+    host: Optional[str] = Query(None, description="조회할 호스트 이름. 호스트가 1대면 비운다."),
+):
+    return await vg_vm.list_host_vms(host)
+
+@router.get("/vg_list_vm", operation_id="vg_list_vm", description=(
+    "이 서버가 Vagrant로 생성한 전체 VM 목록(host, project, image 포함)과 상태(PENDING, PROVISIONING, CONFIGURING, RUNNING, ERROR, DESTROYING)를 조회하는 도구이다.\n"
+    "ERROR 상태면 last_error 에 원인이 담겨 있다. 사용자가 호스트나 상태를 말했을 때만 host, state 로 거른다.\n"
+    "이 서버의 기록 기준이므로, VM 이 실제로 떠 있는지는 vg_get_vm 으로 확인한다."
+))
+async def vg_list_vm(
+    host: Optional[str] = Query(None, description="이 호스트의 VM 만 보려면 호스트 이름. 아니면 비운다."),
+    state: Optional[ResourceState] = Query(None, description="이 상태의 VM 만 보려면 상태. 아니면 비운다."),
+):
+    return await vg_vm.list_all(host=host, state=state)
+
+@router.get("/vg_get_vm", operation_id="vg_get_vm", description=(
+    "VM 1대의 기록(vg_list_vm 과 같은 항목)과 호스트의 VirtualBox 에서 확인한 실제 상태(actual)를 조회하는 도구이다. (읽기 전용, SSH 로 확인하므로 수 초 걸린다)\n"
+    "사용자가 특정 VM 하나를 묻거나, VM 이 실제로 떠 있는지 확인할 때 쓴다.\n"
+    "mismatch 가 있으면 기록과 실제가 다른 것이니 그대로 사용자에게 알린다. actual.checked=false 면 호스트에 접속하지 못한 것이다(error 참고)."
+))
+async def vg_get_vm(
+    name: str = Query(..., pattern=NAME_PATTERN, description="조회할 VM 이름(예: sandbox-01)"),
+):
+    return await vg_vm.get(name)

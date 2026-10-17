@@ -17,7 +17,7 @@ from mcp_server.utils import get_env_int
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-@asynccontextmanager
+@asynccontextmanager # 시작할 때 한번, 끝날 때 한번 실행되는 훅 
 async def lifespan(app: FastAPI):
     logging.info("MCP Server 가동 준비 중...")
     await init_db()
@@ -43,16 +43,16 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # 내부 정보가 Client 로 새지 않도록 상세 내용은 로그에만 남긴다.
+    # 내부 정보가 Client 로 새지 않도록 상세 내용은 로그에만 남긴다. - vagrant mcp 서버 로그 
     logger.exception(f"처리하지 못한 예외: {request.url.path}")
     return JSONResponse(status_code=500, content={"success": False, "message": "Internal Server Error"})
 
-app.include_router(mcp_router)
+app.include_router(mcp_router) # endpoint들을 앱에 등록 
 
 # 라우트를 모두 등록한 뒤 생성해야 도구 목록에 포함된다. /mcp 에 Streamable HTTP 로 노출.
-mcp = FastApiMCP(app, include_tags=["mcp"])
-mcp.mount_http()
+mcp = FastApiMCP(app, include_tags=["mcp"]) # MCP 프로토콜과 REST 사이의 프로토콜 변환 게이트웨이 
+mcp.mount_http() #FastApiMCP가 만든 MCP 입구를 FastAPI 앱 안에 실제 URL로 붙이는 동작 (/mcp 주소에 연결) 
 
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn # 웹 서버 
     uvicorn.run(app, host=os.getenv("SERVER_HOST", "0.0.0.0"), port=get_env_int("SERVER_PORT", 8000))

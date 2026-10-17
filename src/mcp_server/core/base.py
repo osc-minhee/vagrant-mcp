@@ -9,25 +9,40 @@ from mcp_server import database as db_service
 from mcp_server.core.constants import ResourceState, CloudProvider, STABLE_STATES
 from mcp_server.core.executor.ansible import AnsibleExecutor
 from mcp_server.core.executor.base import InfraExecutor
+from mcp_server.core.notify import notify
+from mcp_server.core.redact import redact_text
 from mcp_server.schemas.base import ProvisioningManifest
 
-# 자원(IP 등) 할당 ~ DB 기록 구간을 직렬화한다.
+# 자원(IP 등) 할당 ~ DB 기록 구간을 직렬화한다.-> 한번에 한 요청만 지나가게 함 
 _alloc_lock = asyncio.Lock()
 
 # create_task 의 결과를 참조하지 않으면 실행 중에 GC 될 수 있으므로 보관한다.
 _background_tasks: Set[asyncio.Task] = set()
 
 def _spawn(coro) -> None:
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
+    """ 백그라운드 실행 """
+    task = asyncio.create_task(coro) # 작업을 던져놓고 바로 다음줄로 이동 
+    _background_tasks.add(task) # 참조를 set에 보관 
     task.add_done_callback(_background_tasks.discard)
 
 def _tail(text: str, limit: int = 1000) -> str:
-    text = (text or "").strip()
+    """" 에러 원인 남기는 함수 (뒤쪽 1000자)"""
+    # 가린 뒤에 자른다. 먼저 자르면 비밀값/주소가 중간에 잘려 가려지지 않을 수 있다. (원문은 실행 로그에 남는다)
+    text = redact_text((text or "").strip())
     return text if len(text) <= limit else "..." + text[-limit:]
+
+def _label(resource_id: str, manifest: ProvisioningManifest) -> str:
+    # 알림에 쓸 이름. 요청 때의 VM 이름, 없으면 resource_id.
+    return str(manifest.vars.get("name") or resource_id)
+
+def _where(manifest: ProvisioningManifest) -> str:
+    # 알림에 붙일 위치 (호스트, IP). 없으면 빈 문자열.
+    parts = [str(manifest.vars[k]) for k in ("host", "ip") if manifest.vars.get(k)]
+    return f" ({', '.join(parts)})" if parts else ""
 
 class ResourceProvisioner(ABC):
     """
+    처리 순서 흐름을 정해둔 틀 
     모든 인프라 리소스 프로비지너의 최상위 추상 클래스.
     VM, LXC, Network 등 모든 리소스 관리 클래스는 이 클래스를 상속받아야 한다.
     """
@@ -38,7 +53,7 @@ class ResourceProvisioner(ABC):
     @abstractmethod
     def infra_executor(self) -> InfraExecutor:
         """
-        리소스를 생성/변경/삭제하는 Executor (Vagrant, Terraform 등)
+        리소스를 생성/변경/삭제하는 Executor (Vagrant, Terraform 등) - 실제 명령을 수행 
         """
         pass
 
@@ -133,6 +148,15 @@ class ResourceProvisioner(ABC):
             if not ok:
                 raise RuntimeError(f"생성 실패: {_tail(err or out)}")
 
+            # 명령이 성공했다고 해도 실제로 떠 있는지 확인한 뒤에 다음 단계로 간다.
+            ok, message = await self.infra_executor.verify_applied(resource_id, manifest.vars)
+            if not ok:
+                raise RuntimeError(f"생성 확인 실패: {message}")
+            if message:
+                self.logger.warning(f"[{resource_id}] {message}")
+                manifest = manifest.model_copy(update={"last_warning": message})
+                await self.update_state(resource_id, ResourceState.PROVISIONING, manifest.model_dump())
+
             self.logger.info(f"[{resource_id}] {self.resource_type().upper()} 리소스 생성 완료.")
 
             if self.config_executor:
@@ -148,11 +172,14 @@ class ResourceProvisioner(ABC):
             # LIFECYCLE - RUNNING
             await self.update_state(resource_id, ResourceState.RUNNING)
             self.logger.info(f"[{resource_id}] 모든 프로비저닝 작업 완료.")
+            warning = getattr(manifest, "last_warning", None)
+            await notify(f"✅ '{name}' 생성 완료{_where(manifest)}" + (f"\n⚠️ {warning}" if warning else ""))
 
         # LIFECYCLE - ERROR
         except Exception as e:
             self.logger.error(f"[{resource_id}] {self.resource_type().upper()} 리소스 생성 중 오류가 발생하였습니다: {e}")
             await self.update_state(resource_id, ResourceState.ERROR, {**manifest.model_dump(), "last_error": str(e)})
+            await notify(f"❌ '{name}' 생성 실패{_where(manifest)}: {e}", error=True)
 
     async def update(self, params: Any) -> Dict[str, Any]:
         """
@@ -186,12 +213,20 @@ class ResourceProvisioner(ABC):
             if not ok:
                 raise RuntimeError(f"업데이트 실패: {_tail(err or out)}")
 
-            await self.update_state(resource_id, ResourceState.RUNNING)
+            ok, message = await self.infra_executor.verify_applied(resource_id, new.vars)
+            if not ok:
+                raise RuntimeError(f"업데이트 확인 실패: {message}")
+            if message:
+                self.logger.warning(f"[{resource_id}] {message}")
+            # 이전 경고는 지우고, 이번 확인의 경고만 남긴다.
+            await self.update_state(resource_id, ResourceState.RUNNING, {**new.model_dump(exclude={"last_warning"}), **({"last_warning": message} if message else {})})
+            await notify(f"✅ '{_label(resource_id, new)}' 변경 완료{_where(new)}" + (f"\n⚠️ {message}" if message else ""))
 
         except Exception as e:
             self.logger.error(f"[{resource_id}] 업데이트 중 오류 발생: {e}")
             # 반영되지 않았을 수 있으므로 이전 설정을 남겨 둔다.
             await self.update_state(resource_id, ResourceState.ERROR, {**current.model_dump(), "last_error": str(e)})
+            await notify(f"❌ '{_label(resource_id, current)}' 변경 실패{_where(current)}: {e}", error=True)
 
     async def destroy(self, params: Any) -> Dict[str, Any]:
         """
@@ -221,12 +256,21 @@ class ResourceProvisioner(ABC):
             if not ok:
                 raise RuntimeError(f"삭제 실패: {_tail(err or out)}")
 
+            # 실제로 사라진 것을 확인한 뒤에만 기록을 지운다. (남아 있으면 ERROR 로 두어 다시 삭제할 수 있게 한다)
+            ok, message = await self.infra_executor.verify_destroyed(resource_id, manifest.vars)
+            if not ok:
+                raise RuntimeError(f"삭제 확인 실패: {message}")
+            if message:
+                self.logger.warning(f"[{resource_id}] {message}")
+
             await self.unregister_resource(resource_id)
             self.logger.info(f"[{resource_id}] 리소스 삭제 완료.")
+            await notify(f"🗑️ '{_label(resource_id, manifest)}' 삭제 완료{_where(manifest)}" + (f"\n⚠️ {message}" if message else ""))
 
         except Exception as e:
             self.logger.error(f"[{resource_id}] 삭제 실패: {e}")
             await self.update_state(resource_id, ResourceState.ERROR, {**manifest.model_dump(), "last_error": str(e)})
+            await notify(f"❌ '{_label(resource_id, manifest)}' 삭제 실패{_where(manifest)}: {e}", error=True)
 
     async def list_all(self) -> List[Dict[str, Any]]:
         """

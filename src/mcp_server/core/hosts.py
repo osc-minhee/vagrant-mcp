@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from mcp_server.core import redact
-from mcp_server.core.constants import PROJECT_PATTERN
+from mcp_server.core.constants import PROJECT_PATTERN, SECRETS_DIR
 from mcp_server.core.executor.runner import CommandRunner, build_runner
 from mcp_server.utils import expand_ip_range, get_env_int
 
@@ -29,12 +29,20 @@ class VagrantHost:
     bridge: Optional[str] = None
     # vg_create_vm 에서 project 를 비웠을 때 쓰는 프로젝트 폴더. 없으면 workdir 바로 아래에 만든다.
     default_project: Optional[str] = None
+    # IP 를 고를 때 이 폴더 아래의 Vagrantfile 에 적힌 IP 를 사용 중으로 본다. (기본: workdir)
+    scan_root: str = ""
 
 def _ip_pool(entry: Dict[str, Any]) -> List[str]:
     specs = entry.get("ip_ranges") or entry.get("ip_range") or []
     if isinstance(specs, str):
         specs = [specs]
     return expand_ip_range(",".join(str(s) for s in specs))
+
+def _register_key_path(path: Optional[str], label: str) -> None:
+    # 설정에 적힌 형태('~/' 포함)와 실제 경로를 모두 가린다. SECRETS_DIR 아래면 <secrets> 로도 가려진다.
+    if path:
+        redact.register_path(path, label)
+        redact.register_path(os.path.expanduser(path), label)
 
 def _entries_from_env() -> List[Dict[str, Any]]:
     """
@@ -50,6 +58,7 @@ def _entries_from_env() -> List[Dict[str, Any]]:
             "workdir": os.getenv("VAGRANT_WORKDIR", DEFAULT_WORKDIR),
             "ip_range": os.getenv("VAGRANT_IP_RANGE", ""),
             "bridge": os.getenv("VAGRANT_BRIDGE") or None,
+            "scan_root": os.getenv("VAGRANT_SCAN_ROOT") or None,
         }]
 
     try:
@@ -67,6 +76,10 @@ def load_hosts() -> Dict[str, VagrantHost]:
     """
     hosts: Dict[str, VagrantHost] = {}
     redact.reset()
+    # 키 파일 등 비밀 파일 위치가 오류 메시지(예: Permission denied: '/app/secrets/.ssh/host_key')로 나가지 않게 한다.
+    redact.register_path(SECRETS_DIR.as_posix(), "<secrets>")
+    redact.register_path(str(SECRETS_DIR), "<secrets>")
+    _register_key_path(os.getenv("VAGRANT_SSH_KEY"), "<ssh-key>")
 
     for i, entry in enumerate(_entries_from_env()):
         if not isinstance(entry, dict) or not entry.get("name") or not entry.get("address"):
@@ -90,6 +103,9 @@ def load_hosts() -> Dict[str, VagrantHost]:
                 "(영문/숫자/._- 만, 한 단계 폴더 이름)"
             )
 
+        workdir = (entry.get("workdir") or DEFAULT_WORKDIR).rstrip("/") or "/"
+        scan_root = (entry.get("scan_root") or workdir).rstrip("/") or "/"
+
         hosts[name.lower()] = VagrantHost(
             name=name,
             runner=build_runner(
@@ -99,14 +115,16 @@ def load_hosts() -> Dict[str, VagrantHost]:
                 key_path=entry.get("ssh_key") or None,
                 password=entry.get("ssh_password") or None,
             ),
-            workdir=(entry.get("workdir") or DEFAULT_WORKDIR).rstrip("/") or "/",
+            workdir=workdir,
             ip_pool=ip_pool,
             bridge=entry.get("bridge") or None,
             default_project=default_project,
+            scan_root=scan_root,
         )
 
         # 응답(오류 메시지 등)에서 이 호스트의 주소, 경로, 계정명을 가리기 위해 등록한다.
-        redact.register_host(name, str(entry["address"]), hosts[name.lower()].workdir, entry.get("user") or "vagrant")
+        redact.register_host(name, str(entry["address"]), workdir, entry.get("user") or "vagrant", scan_root=scan_root)
+        _register_key_path(entry.get("ssh_key"), f"<ssh-key:{name}>")
 
     logger.info(f"Vagrant 호스트 {len(hosts)}대 로드: {', '.join(h.name for h in hosts.values())}")
     return hosts
