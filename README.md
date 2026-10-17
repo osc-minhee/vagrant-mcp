@@ -265,7 +265,7 @@ cd src && SECRETS_DIR=../secrets python -m mcp_server.main
 | `vg_destroy_vm` | `vagrant destroy -f` 후 VM 폴더 삭제 |
 | `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 (DB 기록 기준). `host`, `state` 로 거르기 |
 | `vg_get_vm` | VM 1대의 기록 + 호스트 VirtualBox 의 실제 상태(`actual`). 기록은 RUNNING 인데 실제로 꺼져 있거나 없거나 사양이 다르면 `mismatch` |
-| `vg_list_host_vms` | 호스트의 VirtualBox VM 전체(이 서버가 만들지 않은 VM 포함). 이름, 상태, vCPU, 메모리, 게스트 IP, `managed`(이 서버가 만든 VM 인지). SSH 계정으로 보이는 VM 만 나옵니다 |
+| `vg_list_host_vms` | 호스트의 VM 전체(이 서버가 만들지 않은 VM, 다른 계정의 VM 포함). `scan_root` 아래 Vagrantfile 과 `.vagrant` 기록, 실행 중인 VirtualBox 프로세스(모든 계정), SSH 계정의 VirtualBox 목록을 VM UUID 로 합칩니다. 프로젝트 폴더, 머신, 소유 계정, 상태, IP, `managed`(이 서버가 만든 VM 인지). 다른 계정의 꺼진 VM 은 `not_running` 으로만 보이고, 읽기 권한이 없는 폴더는 찾지 못합니다. 계정명은 별칭(`server-account`, `user-1` …)으로 가리며 폴더/VM 이름 안의 계정명도 같은 별칭으로 바꿉니다 |
 
 ```markdown
 # User Prompt(VM 생성)
