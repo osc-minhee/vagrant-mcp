@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import logging
+import re
 import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -123,6 +124,39 @@ for id in $IDS; do
 done
 true
 """
+
+# 계정과 상관없이 호스트의 VM 을 찾는다. (읽기 전용)
+#  PS=<계정> <명령줄> : 실행 중인 VirtualBox VM 프로세스 (모든 계정. --startvm 뒤가 VM UUID, --comment 뒤가 VM 이름)
+#  VF=<폴더>          : scan_root 아래 Vagrantfile 이 있는 폴더. 이어서 OWNER(파일 소유자), VFIP(적힌 고정 IP),
+#                       MACHINE/MID(.vagrant/machines/<머신>/virtualbox/id 의 VM UUID. 읽지 못하면 '?'. id 가 없으면 destroy 됐거나 만든 적 없음),
+#                       NOACCESS(.vagrant/machines 를 읽을 권한이 없음)
+#  NOROOT=1           : scan_root 폴더가 없음
+# grep 패턴을 [V]BoxHeadless 로 쓰면 이 스크립트 자신(bash -c 의 명령줄)은 걸리지 않는다.
+_SCAN_VMS_SCRIPT = r"""
+ps -eo user=,args= 2>/dev/null | grep -E '[V]BoxHeadless|[V]irtualBoxVM' | sed 's/^/PS=/'
+ROOT=__ROOT__
+if [ -d "$ROOT" ]; then
+  find "$ROOT" -maxdepth 6 \( -name .vagrant -o -name .git -o -name node_modules \) -prune -o -name Vagrantfile -type f -print 2>/dev/null \
+  | while IFS= read -r vf; do
+      d="$(dirname "$vf")"
+      echo "VF=$d"
+      echo "OWNER=$(stat -c %U "$vf" 2>/dev/null)"
+      grep -hoE "ip:[[:space:]]*[\"'][0-9]+(\.[0-9]+){3}[\"']" "$vf" 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | sed 's/^/VFIP=/'
+      if [ -d "$d/.vagrant/machines" ] && ! ls "$d/.vagrant/machines" >/dev/null 2>&1; then echo "NOACCESS=1"; fi
+      for m in "$d"/.vagrant/machines/*/virtualbox; do
+        [ -f "$m/id" ] || continue
+        echo "MACHINE=$(basename "$(dirname "$m")")"
+        echo "MID=$(cat "$m/id" 2>/dev/null || echo '?')"
+      done
+    done
+else
+  echo "NOROOT=1"
+fi
+true
+"""
+
+# Vagrant 가 모든 VM 에 붙이는 NAT 주소. VM 을 구분하는 데 쓸모가 없어 목록에서 뺀다.
+_VAGRANT_NAT_IP = "10.0.2.15"
 
 class HostInspectError(RuntimeError):
     """
@@ -330,7 +364,8 @@ class VagrantExecutor(InfraExecutor):
 
     async def list_vms(self, host: VagrantHost, only: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        호스트의 VirtualBox 에 등록된 VM 을 [{name, state, cpus, memory_mb, guest_ips}] 로 돌려준다. (읽기 전용)
+        호스트의 VirtualBox 에 등록된 VM 을 [{id, name, state, cpus, memory_mb, guest_ips}] 로 돌려준다. (읽기 전용)
+        SSH 계정의 VM 만 보인다. id 는 전체 조회면 VM UUID, only 조회면 only 값이다.
         only(VM 이름)를 주면 그 VM 만 보고, 없으면 빈 목록. 접속 실패는 예외로, VBoxManage 가 없으면 HostInspectError.
         """
         script = _LIST_VMS_SCRIPT.replace("__ONLY__", shlex.quote(only or ""))
@@ -345,7 +380,7 @@ class VagrantExecutor(InfraExecutor):
                 continue
             value = value.strip().strip('"')
             if key == "@@VM":
-                vms.append({"name": value, "state": None, "cpus": None, "memory_mb": None, "guest_ips": []})
+                vms.append({"id": value, "name": value, "state": None, "cpus": None, "memory_mb": None, "guest_ips": []})
             elif not vms:
                 continue
             elif key == "name":
@@ -357,6 +392,115 @@ class VagrantExecutor(InfraExecutor):
             elif key == "IP" and value not in vms[-1]["guest_ips"]:
                 vms[-1]["guest_ips"].append(value)
         return vms
+
+    async def host_inventory(self, host: VagrantHost) -> Dict[str, Any]:
+        """
+        호스트의 VM 을 계정과 상관없이 모아 VM UUID 로 합친다. (읽기 전용)
+        1) SSH 계정의 VirtualBox 등록 VM: 정확한 상태와 사양
+        2) 실행 중인 VirtualBox 프로세스(모든 계정): 실행 여부와 실행한 계정
+        3) scan_root 아래 Vagrantfile 과 .vagrant 기록(모든 계정, 읽기 권한이 있는 폴더): 프로젝트 폴더, 머신, 고정 IP
+        다른 계정의 꺼진 VM 은 poweroff/saved 를 구분할 수 없어 state="not_running" 이다.
+        반환: {"vms": [...], "notes": [조회하지 못한 부분 설명]}. 호스트 접속 실패는 예외로 올라간다.
+        """
+        async def own():
+            try:
+                return await self.list_vms(host), None
+            except HostInspectError as e:
+                return [], f"SSH 계정의 VirtualBox 목록을 읽지 못했습니다: {e}"
+
+        (own_vms, own_error), result = await asyncio.gather(
+            own(), host.runner.run(_SCAN_VMS_SCRIPT.replace("__ROOT__", sh_path(host.scan_root)), timeout=120)
+        )
+        notes = [own_error] if own_error else []
+        if result.exit_code != 0:
+            raise HostInspectError(f"VM 검색 실패 (exit={result.exit_code}): {redact_text(result.stderr.strip())[:200]}")
+
+        vms: Dict[str, Dict[str, Any]] = {}
+
+        def entry(key: str, **values) -> Dict[str, Any]:
+            if key not in vms:
+                vms[key] = {
+                    "name": None, "state": None, "owner": None, "project_dir": None, "vagrant_machine": None,
+                    "cpus": None, "memory_mb": None, "ips": [], "sources": [],
+                }
+            item = vms[key]
+            for k, v in values.items():
+                if item.get(k) is None:
+                    item[k] = v
+            return item
+
+        def add(item: Dict[str, Any], source: str, ips=()) -> None:
+            if source not in item["sources"]:
+                item["sources"].append(source)
+            for ip in ips:
+                if ip != _VAGRANT_NAT_IP and ip not in item["ips"]:
+                    item["ips"].append(ip)
+
+        # 1) SSH 계정의 VM 은 상태와 사양이 정확하므로 먼저 채운다. (LocalRunner 면 계정을 모른다)
+        ssh_user = getattr(host.runner, "user", None)
+        for vm in own_vms:
+            item = entry(vm["id"], name=vm["name"], state=vm["state"], cpus=vm["cpus"], memory_mb=vm["memory_mb"], owner=ssh_user)
+            add(item, "virtualbox", vm["guest_ips"])
+
+        def rel(path: str) -> str:
+            # scan_root 기준 상대 경로 (호스트의 절대 경로는 보여 주지 않는다)
+            root = host.scan_root.rstrip("/")
+            if path == root:
+                return "."
+            return path[len(root) + 1:] if path.startswith(root + "/") else path
+
+        current: Optional[Dict[str, Any]] = None
+        machine: Optional[str] = None
+        for line in result.stdout.splitlines():
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            value = value.strip()
+            if key == "PS":
+                user, _, args = value.partition(" ")
+                vm_id = re.search(r"(?:^|\s)(?:--?startvm|-s)[= ](\S+)", args)
+                if not vm_id:
+                    continue
+                comment = re.search(r"(?:^|\s)--?comment[= ](\S+)", args)
+                item = entry(vm_id.group(1), name=comment.group(1) if comment else None, state="running", owner=user)
+                add(item, "process")
+            elif key == "NOROOT":
+                notes.append("scan_root 폴더가 없어 Vagrantfile 은 찾지 못했습니다.")
+            elif key == "VF":
+                current = {"dir": rel(value), "owner": None, "ips": [], "machines": 0}
+                # 머신 기록이 없으면 아직 vagrant up 하지 않은 프로젝트다. 머신이 나오면 이 항목은 지운다.
+                current["key"] = f"vagrantfile:{value}"
+                entry(current["key"], state="not_created", project_dir=current["dir"])
+                add(vms[current["key"]], "vagrantfile")
+            elif current is None:
+                continue
+            elif key == "OWNER":
+                current["owner"] = value or None
+                vms[current["key"]]["owner"] = current["owner"]
+            elif key == "VFIP":
+                current["ips"].append(value)
+                add(vms[current["key"]], "vagrantfile", [value])
+            elif key == "NOACCESS" and current["key"] in vms:
+                # .vagrant 기록을 읽을 수 없어 만들어졌는지 알 수 없다.
+                vms[current["key"]]["state"] = "unknown"
+            elif key == "MACHINE":
+                machine = value
+            elif key == "MID":
+                if current["machines"] == 0:
+                    vms.pop(current["key"], None)
+                current["machines"] += 1
+                # id 를 읽지 못하면(권한) 상태를 알 수 없다. 읽었는데 1), 2) 에 없으면 꺼져 있다.
+                readable = value not in ("", "?")
+                item = entry(
+                    value if readable else f"vagrantfile:{current['dir']}#{machine}",
+                    state="not_running" if readable else "unknown",
+                    owner=current["owner"],
+                )
+                item["project_dir"] = current["dir"]
+                item["vagrant_machine"] = machine
+                add(item, "vagrantfile", current["ips"])
+
+        return {"vms": list(vms.values()), "notes": notes}
 
     async def inspect_host(self, host: VagrantHost) -> Dict[str, Any]:
         """

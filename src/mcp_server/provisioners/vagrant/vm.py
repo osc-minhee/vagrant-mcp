@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 from mcp_server.core.base import ResourceProvisioner
 from mcp_server.core.constants import APP_DIR, SECRETS_DIR, CloudProvider, Flavor, Image
@@ -40,6 +41,31 @@ def _vars_of(item: Dict[str, Any]) -> Dict[str, Any]:
 
 def _gi(mb: Optional[int]) -> Optional[float]:
     return None if mb is None else round(mb / 1024, 1)
+
+def _mask_owners(vms: List[Dict[str, Any]], server_user: Optional[str]) -> None:
+    """
+    계정명이 응답에 나가지 않게 owner 를 별칭(이 서버의 SSH 계정은 server-account, 나머지는 user-1, user-2 ...)으로 바꾸고,
+    project_dir 과 VM 이름 안의 계정명도 같은 별칭으로 바꾼다. 같은 계정은 같은 별칭이라 누구 VM 인지는 구분된다.
+    vms 는 정렬된 상태로 받아야 별칭 번호가 매번 같게 붙는다.
+    """
+    aliases: Dict[str, str] = {}
+    if server_user:
+        aliases[server_user] = "server-account"
+    for vm in vms:
+        owner = vm.get("owner")
+        if owner and owner not in aliases:
+            aliases[owner] = f"user-{sum(1 for a in aliases.values() if a.startswith('user-')) + 1}"
+
+    def swap(text: Optional[str]) -> Optional[str]:
+        # 경로/이름을 구분자(/ _ . -) 기준으로 나눠 계정명과 정확히 같은 조각만 바꾼다.
+        if not text:
+            return text
+        return redact_text("".join(aliases.get(part, part) for part in re.split(r"([/_.\-])", text)))
+
+    for vm in vms:
+        vm["owner"] = aliases.get(vm["owner"], vm["owner"])
+        vm["project_dir"] = swap(vm["project_dir"])
+        vm["name"] = swap(vm["name"])
 
 def _pool_ranges(pool: List[str]) -> str:
     """
@@ -326,43 +352,51 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
     async def list_host_vms(self, host: Optional[str] = None) -> Dict[str, Any]:
         """
-        호스트의 VirtualBox 에 등록된 VM 전체(이 서버가 만들지 않은 VM 포함)와 상태.
-        SSH 계정으로 보이는 VM 만 나온다. managed=True 면 이 서버가 만든 VM 이다.
+        호스트의 VM 전체(이 서버가 만들지 않은 VM, 다른 계정의 VM 포함)와 상태.
+        scan_root 아래 Vagrantfile, 실행 중인 VirtualBox 프로세스, SSH 계정의 VirtualBox 목록을 합친다.
+        managed=True 면 이 서버가 만든 VM 이다.
         """
         if not host and len(HOSTS) > 1:
             raise ValueError(f"host 를 지정해야 합니다. (사용 가능: {', '.join(h.name for h in HOSTS.values())})")
         target = self._resolve_host(host)
 
         try:
-            vms = await self.infra_executor.list_vms(target)
+            inventory = await self.infra_executor.host_inventory(target)
         except Exception as e:
             raise RuntimeError(redact_text(
                 f"호스트 '{target.name}' 의 VM 목록을 조회하지 못했습니다: {type(e).__name__}: {e}"
             )) from e
 
-        # 이 서버가 만든 VM 은 VirtualBox 이름이 resource_id(vg-<이름>) 이다.
+        # 이 서버가 만든 VM 은 VirtualBox 이름과 폴더 이름이 모두 resource_id(vg-<이름>) 이다.
         managed = {
             item["resource_id"]: item
             for item in await super().list_all()
             if (self._host_name(_vars_of(item)) or "").lower() == target.name.lower()
         }
+        vms = inventory["vms"]
         for vm in vms:
-            own = managed.get(vm["name"])
+            folder = (vm["project_dir"] or "").rsplit("/", 1)[-1]
+            own = managed.get(vm["name"]) or managed.get(folder)
             vm["managed"] = own is not None
             if own:
                 # vg_* 도구에서 쓰는 이름과 이 서버의 기록 상태
                 vm["managed_name"] = own["name"]
                 vm["managed_state"] = own["state"]
             vm["memory_gi"] = _gi(vm["memory_mb"])
-        vms.sort(key=lambda v: (v["state"] != "running", str(v["name"])))
+        vms.sort(key=lambda v: (v["state"] != "running", str(v["owner"] or ""), str(v["project_dir"] or ""), str(v["name"] or "")))
+        # managed 판별(VM/폴더 이름 비교)이 끝난 뒤에 계정명을 가린다.
+        _mask_owners(vms, getattr(target.runner, "user", None))
 
-        return {
+        result = {
             "host": target.name,
             "total": len(vms),
             "running": sum(1 for v in vms if v["state"] == "running"),
             "managed": sum(1 for v in vms if v["managed"]),
             "vms": vms,
         }
+        if inventory["notes"]:
+            result["notes"] = [redact_text(n) for n in inventory["notes"]]
+        return result
 
     async def _host_status(self, host: VagrantHost) -> Dict[str, Any]:
         """

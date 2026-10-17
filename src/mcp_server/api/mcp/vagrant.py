@@ -53,9 +53,13 @@ async def vg_list_hosts():
     return await vg_vm.list_hosts()
 
 @router.get("/vg_list_host_vms", operation_id="vg_list_host_vms", description=(
-    "호스트의 VirtualBox 에 있는 VM 전체(이 서버가 만들지 않은 VM 포함)와 상태(running, poweroff, saved, aborted 등)를 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
+    "호스트에 있는 VM 전체(이 서버가 만들지 않은 VM, 다른 계정의 VM 포함)를 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
+    "호스트 scan_root 아래의 Vagrantfile(project_dir, vagrant_machine), 실행 중인 VirtualBox 프로세스(owner), VirtualBox 등록 정보를 합친 결과다.\n"
+    "owner 는 실제 계정명이 아닌 별칭이다(server-account: 이 서버의 계정, user-1/user-2...: 다른 계정). 같은 별칭은 같은 계정이다. 실제 계정명을 추측하거나 묻지 않는다.\n"
+    "state: running, poweroff/saved/aborted(이 서버 계정의 VM 만 구분됨), not_running(꺼져 있음. 다른 계정 VM 이라 세부 상태는 모름), "
+    "not_created(Vagrantfile 만 있고 vagrant up 한 적 없음), unknown(.vagrant 기록을 읽을 권한이 없음).\n"
     "managed=true 는 이 서버가 만든 VM 이고 managed_name 이 vg_* 도구에서 쓰는 이름이다. managed=false 인 VM 은 이 서버로 변경/삭제할 수 없다.\n"
-    "호스트가 1대면 host 를 비우고, 2대 이상이면 지정한다. 호스트의 SSH 계정으로 보이는 VM 만 나오며, guest_ips 는 실행 중이고 Guest Additions 가 있을 때만 보인다."
+    "호스트가 1대면 host 를 비우고, 2대 이상이면 지정한다. notes 가 있으면 조회하지 못한 부분이니 함께 전한다."
 ))
 async def vg_list_host_vms(
     host: Optional[str] = Query(None, description="조회할 호스트 이름. 호스트가 1대면 비운다."),
