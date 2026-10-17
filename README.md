@@ -123,12 +123,30 @@ VAGRANT_SSH_PORT=22
 VAGRANT_WORKDIR="~/vagrant-mcp"        # 호스트에서 VM 폴더를 만들 위치
 VAGRANT_IP_RANGE="10.0.0.60-10.0.0.89" # VM 에 줄 고정 IP 대역 (쉼표로 여러 개)
 VAGRANT_BRIDGE="eno1"                  # 브리지할 호스트 NIC (비우면 vagrant up 때 물어보므로 꼭 지정)
-VAGRANT_BOX="ubuntu/jammy64"
-# VAGRANT_BOX_VERSION="20241002.0.0"
 # VAGRANT_TIMEOUT=1800                 # vagrant 명령 최대 대기(초)
 # VAGRANT_MAX_PARALLEL=2               # 동시에 실행할 vagrant 명령 수
 # VAGRANT_SKIP_ANSIBLE=false           # true 면 Ansible 환경 구성을 건너뜀
+# VAGRANT_VM_PASSWORD_AUTH=true        # VM SSH 비밀번호 로그인 (아래 'VM 이미지와 접속')
+# VAGRANT_VM_PASSWORD="vagrant"        # vagrant 계정 비밀번호
+# VAGRANT_NOTIFY_WEBHOOK="..."         # 작업 완료/실패 알림 웹훅 (아래 '작업 알림')
+# VAGRANT_NOTIFY_ON=all                # error 면 실패만 알림
 ```
+
+#### VM 이미지와 접속
+
+`vg_create_vm` 의 `image` 로 OS 를 고릅니다 (생략하면 `ubuntu-22.04`). box 이름과 버전은 [vm.py](./src/mcp_server/provisioners/vagrant/vm.py) 의 `IMAGE_BOXES` 에 고정되어 있어 사용자가 임의의 box 를 지정할 수 없고, 생성 후에는 바꿀 수 없습니다.
+
+| image | box | 버전 |
+| :--- | :--- | :--- |
+| `ubuntu-22.04` (기본) | `ubuntu/jammy64` | `20241002.0.0` |
+| `rocky-8` | `bento/rockylinux-8` | `202510.26.0` |
+| `rocky-9` | `bento/rockylinux-9` | `202510.26.0` |
+
+- box 는 호스트에 없으면 첫 `vagrant up` 때 Vagrant 가 Vagrant Cloud 에서 받습니다 (호스트 인터넷 필요, 처음 몇 분, 이후 캐시).
+- 프로비저닝: Vagrant 가 VM 에 공개키(`agent_key.pub`, `admin_key.pub`)를 등록하고, Ansible [base.yml](./src/ansible/playbooks/base.yml) 이 OS 계열별(apt/dnf)로 기초 환경과 SSH 설정을 합니다.
+- **SSH 비밀번호 로그인이 기본으로 켜져 있습니다** (내부망 테스트/시연용). `vagrant` 계정 비밀번호는 `VAGRANT_VM_PASSWORD`(기본 `vagrant`)이고, `VAGRANT_VM_PASSWORD_AUTH=false` 면 키 로그인만 됩니다. 브리지 네트워크라 같은 LAN 에서 누구나 접속을 시도할 수 있으므로, 외부에 노출되는 망에서는 끄거나 비밀번호를 바꾸세요. `VAGRANT_SKIP_ANSIBLE=true` 면 이 설정도 적용되지 않습니다.
+- 키로 접속: `ssh -i admin_key vagrant@<VM IP>`, 또는 호스트의 VM 폴더에서 `vagrant ssh`.
+- 이미 만든 VM 에는 설정 변경이 반영되지 않습니다 (Ansible 은 생성 때만 실행).
 
 #### 여러 호스트 사용
 
@@ -145,13 +163,21 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
 | `workdir` | VM 폴더를 만들 경로 (기본 `~/vagrant-mcp`) |
 | `default_project` | `vg_create_vm` 에서 `project` 를 비웠을 때 쓸 프로젝트 폴더 (예: `openwebui`). 없으면 `VAGRANT_DEFAULT_PROJECT`, 그것도 없으면 workdir 바로 아래 |
 | `ip_ranges` | VM 에 줄 고정 IP 대역 목록. 호스트끼리 겹치지 않게 지정 |
+| `scan_root` | IP 를 고를 때 이 폴더 아래(최대 6단계) Vagrantfile 의 IP 를 사용 중으로 봅니다 (기본: `workdir`) |
 | `bridge` | 브리지할 호스트 NIC 이름 |
 | `ssh_key`, `ssh_password` | 호스트별 접속 인증 (없으면 공통 설정) |
 
-- 첫 번째 호스트가 기본 호스트입니다. 호스트 기록이 없는 기존 VM 은 첫 번째 호스트에 있는 것으로 봅니다.
+- 호스트 기록이 없는 기존 VM 은 IP 가 속한 `ip_ranges` 의 호스트에 있는 것으로 봅니다. (호스트가 1대면 그 호스트) 어느 대역에도 속하지 않거나 여러 대역에 속하면 변경/삭제하지 않고 오류를 남깁니다. 변경할 때 찾은 호스트를 기록합니다.
 - 호스트가 1대면 `vg_create_vm` 에서 `host` 를 비워도 되고, 2대 이상이면 반드시 지정해야 합니다. 지정하지 않으면 사용 가능한 호스트 목록이 담긴 오류가 반환됩니다.
 - VM 이름은 호스트와 상관없이 전체에서 유일해야 합니다. 변경/삭제는 VM 이 생성된 호스트에서 실행됩니다.
-- IP 는 선택한 호스트의 `ip_ranges` 에서 DB 에 없고 그 호스트에서 ping 응답이 없는 것을 고릅니다. 동시 실행 수(`VAGRANT_MAX_PARALLEL`)는 호스트마다 적용됩니다.
+- IP 는 선택한 호스트의 `ip_ranges` 안에서 아래를 모두 피한 첫 IP 를 고릅니다. 사용 중 IP 확인에 실패하면 생성하지 않습니다.
+  1. 이 서버 DB 에 기록된 IP
+  2. **그 호스트**의 `scan_root` 아래 Vagrantfile 에 적힌 IP (꺼진 VM, 다른 사람이 만든 VM 포함)
+  3. **그 호스트**에서 SSH 계정으로 실행 중인 VirtualBox VM 의 IP (Guest Additions 가 있는 VM)
+  4. 그 호스트에서 ping 응답이 있는 IP
+- `vg_create_vm` 에서 `ip` 를 지정하면 자동 할당 대신 그 IP 를 씁니다. 그 호스트의 `ip_ranges` 안이어야 하고, 위 1~4 에 걸리면 다른 IP 로 바꾸지 않고 이유를 담아 거절합니다. 생성 후에는 IP 를 바꿀 수 없습니다.
+- 다른 계정으로 띄운 VM, `scan_root` 밖의 Vagrantfile, IP 를 계산해서 넣는 Vagrantfile(`"10.0.0.#{i}"`)은 확인하지 못합니다. `ip_ranges` 는 이 서버 전용 구간으로 두는 것이 가장 안전합니다.
+- 동시 실행 수(`VAGRANT_MAX_PARALLEL`)는 호스트마다 적용됩니다.
 
 #### 프로젝트 폴더
 
@@ -159,18 +185,37 @@ VM 은 `{workdir}/{project}/vg-<이름>` 에 만들어집니다. `project` 는 `
 
 #### 응답에서 내부 정보 가리기
 
-LLM(Client)으로 나가는 오류 메시지(호스트 접속 실패, 생성 거절, `last_error`, 오류 응답)는 [redact.py](./src/mcp_server/core/redact.py) 로 내부 정보를 가립니다. 서버 로그와 DB 에는 원문이 남습니다.
+LLM(Client)으로 나가는 오류 메시지(호스트 접속 실패, 생성 거절, `last_error`, 오류 응답)는 [redact.py](./src/mcp_server/core/redact.py) 로 내부 정보를 가립니다. 서버 로그에는 원문이 남습니다. 명령 출력을 잘라서 남길 때는(`last_error` 등) 잘린 값이 가려지지 않는 일이 없도록 먼저 가린 뒤에 자릅니다.
 
 | 가리는 것 | 표시 |
 | :--- | :--- |
 | 호스트 접속 주소(`address` 의 IP/도메인), 그 앞의 `user@` | `<host-addr:호스트이름>`, `***@` |
 | 호스트의 `workdir` | `<workdir:호스트이름>` (뒤의 프로젝트/VM 폴더 이름은 그대로) |
+| `SECRETS_DIR`(기본 `/app/secrets`) 경로 | `<secrets>` (예: `<secrets>/.ssh/host_key`) |
+| SSH 키 경로 (`VAGRANT_SSH_KEY`, 호스트별 `ssh_key`) | `<ssh-key>`, `<ssh-key:호스트이름>` |
 | 그 밖의 `/home/<계정>`, `/Users/<계정>` | `/home/***` |
 | 호스트의 SSH 계정명 (`vagrant`, `root`, `ubuntu` 등 흔한 이름은 제외) | `***` |
 | `password`/`token`/`secret`/`api_key` 뒤의 값, PRIVATE KEY 블록 | `***`, `<PRIVATE KEY 숨김>` |
 
 - `vg_list_hosts` 응답에는 `workdir` 를 넣지 않습니다.
 - VM 의 IP 와 호스트 이름은 가리지 않습니다 (사용자에게 알려 줘야 합니다). VM IP 는 LiteLLM 등 앞단에서 가리세요.
+
+#### 생성/변경/삭제 후 확인
+
+모든 작업은 백그라운드로 진행되며 상태는 `vg_list_vm` 으로 확인합니다. 명령이 성공했다고 끝내지 않고 실제 상태를 확인한 뒤에 상태를 바꿉니다.
+
+- 생성/변경 후: VirtualBox 에서 VM(`vg-<이름>`)이 `running` 이어야 `RUNNING` 이 됩니다. 아니면 `ERROR`. VM IP 가 호스트에서 ping 에 응답하지 않으면 `RUNNING` 으로 두되 `warning` 에 bridge 설정 확인 안내를 남깁니다.
+- 삭제 후: VM 폴더와 VirtualBox VM 이 모두 사라져야 기록을 지웁니다. 하나라도 남아 있으면 `ERROR` 로 두고(다시 삭제 가능) 원인을 `last_error` 에 남깁니다. 폴더 경로가 생성 때와 달라진 경우(`workdir` 변경 등)도 여기서 잡힙니다.
+
+#### 작업 알림
+
+백그라운드 작업은 LLM 이 `vg_list_vm` 을 다시 호출해야 결과를 알 수 있으므로, `VAGRANT_NOTIFY_WEBHOOK` 을 설정하면 생성/변경/삭제가 끝날 때(성공, 실패) 웹훅으로 한 줄 알립니다. 본문은 `{"content": "..."}` 이며 Open WebUI 채널 수신 웹훅에 그대로 쓸 수 있습니다.
+
+- Open WebUI: 채널 > **Edit channel** > **Webhooks** > **Manage** > **New Webhook** > **Copy URL** 로 받은 주소를 넣습니다. MCP 서버에서 그 주소로 접속할 수 있어야 합니다.
+- 예: `✅ 'sandbox-01' 생성 완료 (host-a, 10.0.0.60)`, `❌ 'sandbox-01' 삭제 실패 (host-a, 10.0.0.60): ...`
+- 메시지는 응답과 같은 규칙으로 가립니다. URL 에는 토큰이 들어 있어 로그에 남기지 않습니다.
+- 알림 전송이 실패해도 작업 결과에는 영향이 없습니다 (로그에 경고만 남김).
+- `VAGRANT_NOTIFY_ON=error` 면 실패만 알립니다.
 
 #### 생성 전 자원 확인
 
@@ -214,11 +259,13 @@ cd src && SECRETS_DIR=../secrets python -m mcp_server.main
 
 | Tool | 설명 |
 | :--- | :--- |
-| `vg_list_hosts` | 호스트 목록과 자원 현황(CPU, 메모리, 디스크, VirtualBox 실행 현황), 이 서버가 만든 VM 수, 남은 IP 수 조회. 접속 실패 호스트는 `reachable=false` |
-| `vg_create_vm` | VM 1대 생성 (name, flavor, purpose, host, project). 호스트가 2대 이상이면 host 지정, project 를 비우면 호스트의 기본 프로젝트. 자원이 부족하면 거절. 백그라운드로 진행 |
+| `vg_list_hosts` | 호스트 목록과 자원 현황(CPU, 메모리, 디스크, VirtualBox 실행 현황), 이 서버가 만든 VM 수, 남은 IP 수(`ip_available`), 대역 안을 다른 VM 이 쓰는 수(`ip_used_by_others`) 조회. 접속 실패 호스트는 `reachable=false` |
+| `vg_create_vm` | VM 1대 생성 (name, flavor, purpose, image, host, project, ip). ip 를 비우면 호스트 IP 대역에서 자동 할당, 지정하면 대역 안이고 비어 있을 때만 사용. 호스트가 2대 이상이면 host 지정, project 를 비우면 호스트의 기본 프로젝트. 자원이 부족하면 거절. 백그라운드로 진행 |
 | `vg_update_vm` | 사양/용도 변경. 실행 중이면 `vagrant reload` 로 재시작 |
 | `vg_destroy_vm` | `vagrant destroy -f` 후 VM 폴더 삭제 |
-| `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 |
+| `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 (DB 기록 기준). `host`, `state` 로 거르기 |
+| `vg_get_vm` | VM 1대의 기록 + 호스트 VirtualBox 의 실제 상태(`actual`). 기록은 RUNNING 인데 실제로 꺼져 있거나 없거나 사양이 다르면 `mismatch` |
+| `vg_list_host_vms` | 호스트의 VirtualBox VM 전체(이 서버가 만들지 않은 VM 포함). 이름, 상태, vCPU, 메모리, 게스트 IP, `managed`(이 서버가 만든 VM 인지). SSH 계정으로 보이는 VM 만 나옵니다 |
 
 ```markdown
 # User Prompt(VM 생성)
@@ -271,7 +318,7 @@ sandbox-01 삭제해줘.
 │  │  ├─ ansible.cfg
 │  │  └─ playbooks/
 │  │     ├─ group_vars/all.yml
-│  │     └─ base.yml                    # 기초 환경 구성 (Debian/Ubuntu)
+│  │     └─ base.yml                    # 기초 환경 구성 (Ubuntu/Rocky, SSH 비밀번호 로그인)
 │  └─ scripts/entrypoint.sh
 │
 ├─ secrets/                              # .env 및 SSH 키 (git 제외)

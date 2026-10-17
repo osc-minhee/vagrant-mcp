@@ -50,11 +50,22 @@ class CloudProvider(str, Enum):
 
 class Flavor(str, Enum):
     """
-    리소스 사양 정의
+    리소스(메모리) 사양 정의
     """
     SMALL = "small"
     MEDIUM = "medium"
     LARGE = "large"
+
+    def __str__(self):
+        return self.value
+
+class Image(str, Enum):
+    """
+    VM 이미지(OS) 정의. 실제 box 이름과 버전은 서버에서 고정한다(provisioners/vagrant/vm.py 의 IMAGE_BOXES).
+    """
+    UBUNTU_2204 = "ubuntu-22.04"
+    ROCKY_8 = "rocky-8"
+    ROCKY_9 = "rocky-9"
 
     def __str__(self):
         return self.value
