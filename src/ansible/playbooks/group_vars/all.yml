@@ -3,13 +3,30 @@
 ansible_become: yes
 ansible_become_method: sudo
 
+# 모든 OS 공통 패키지
 common_packages:
   - python3
   - python3-pip
   - ca-certificates
-  - curl
   - wget
-  - vim
   - git
   - net-tools
   - htop
+
+# Debian/Ubuntu 전용
+common_packages_debian:
+  - curl
+  - vim
+
+# RedHat(Rocky) 전용. htop 은 EPEL 에서 받는다.
+# curl 은 Rocky 9 에 curl-minimal 이 이미 있고, curl 을 따로 설치하면 충돌하므로 넣지 않는다.
+common_packages_redhat:
+  - vim-enhanced
+  - glibc-langpack-ko
+  - glibc-langpack-en
+
+# SSH 비밀번호 로그인 (내부망 테스트/시연용). MCP 서버 환경변수로 바꾼다.
+#   VAGRANT_VM_PASSWORD_AUTH=false 면 켜지 않는다 (기본 true)
+#   VAGRANT_VM_PASSWORD 로 vagrant 계정 비밀번호를 정한다 (기본 vagrant)
+ssh_password_auth: "{{ lookup('env', 'VAGRANT_VM_PASSWORD_AUTH') | default('true', true) | bool }}"
+vm_password: "{{ lookup('env', 'VAGRANT_VM_PASSWORD') | default('vagrant', true) }}"
