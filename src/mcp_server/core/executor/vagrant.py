@@ -30,15 +30,25 @@ else
 fi
 """
 
+# VM 폴더를 지운 뒤, project 폴더(PROJ)가 비었으면 함께 지운다. rmdir 은 빈 폴더만 지우므로 다른 VM/파일이 있으면 남는다.
+# PROJ 는 project 가 있을 때만 넘긴다(비어 있으면 건너뜀). workdir 은 지우지 않는다.
 _DESTROY_SCRIPT = r"""
 DIR=__DIR__
-[ -d "$DIR" ] || { echo "이미 삭제된 리소스입니다."; exit 0; }
-cd "$DIR" || exit 15
-if [ -f Vagrantfile ]; then
-  command -v vagrant >/dev/null 2>&1 || { echo "호스트에 vagrant 가 설치되어 있지 않습니다." >&2; exit 14; }
-  vagrant destroy -f 2>&1 </dev/null || exit $?
+PROJ=__PROJ__
+if [ -d "$DIR" ]; then
+  cd "$DIR" || exit 15
+  if [ -f Vagrantfile ]; then
+    command -v vagrant >/dev/null 2>&1 || { echo "호스트에 vagrant 가 설치되어 있지 않습니다." >&2; exit 14; }
+    vagrant destroy -f 2>&1 </dev/null || exit $?
+  fi
+  cd / && rm -rf -- "$DIR" || exit 15
+else
+  echo "이미 삭제된 리소스입니다."
 fi
-cd / && rm -rf -- "$DIR"
+if [ -n "$PROJ" ] && [ -d "$PROJ" ]; then
+  rmdir -- "$PROJ" 2>/dev/null && echo "비어 있는 project 폴더를 정리했습니다."
+fi
+true
 """
 
 # 호스트의 CPU/메모리/디스크 여유와 VirtualBox 에서 실행 중인 VM 의 할당 합계를 KEY=값 으로 출력한다.
@@ -293,7 +303,14 @@ class VagrantExecutor(InfraExecutor):
 
     async def destroy(self, resource_id: str, vars: Dict[str, Any]) -> ExecResult:
         host = self.host_of(vars)
-        script = _DESTROY_SCRIPT.replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
+        # project 가 있으면 VM 폴더를 지운 뒤 그 project 폴더가 비었을 때 정리한다. (project 가 없으면 상위는 workdir 이라 건드리지 않는다)
+        project = vars.get("project")
+        project_dir = sh_path(f"{host.workdir}/{project}") if project else "''"
+        script = (
+            _DESTROY_SCRIPT
+            .replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
+            .replace("__PROJ__", project_dir)
+        )
         return await self._run(host, resource_id, "destroy", script)
 
 
