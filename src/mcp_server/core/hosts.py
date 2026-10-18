@@ -1,4 +1,5 @@
 # mcp_server/core/hosts.py
+import ipaddress
 import json
 import logging
 import os
@@ -31,6 +32,8 @@ class VagrantHost:
     default_project: Optional[str] = None
     # IP 를 고를 때 이 폴더 아래의 Vagrantfile 에 적힌 IP 를 사용 중으로 본다. (기본: workdir)
     scan_root: str = ""
+    # VM 의 기본 경로로 쓸 bridge 네트워크의 게이트웨이. 없으면 Vagrant 기본값(NAT)이라 다른 대역(VPN 등)에서 접속되지 않는다.
+    gateway: Optional[str] = None
 
 def _ip_pool(entry: Dict[str, Any]) -> List[str]:
     specs = entry.get("ip_ranges") or entry.get("ip_range") or []
@@ -59,6 +62,7 @@ def _entries_from_env() -> List[Dict[str, Any]]:
             "ip_range": os.getenv("VAGRANT_IP_RANGE", ""),
             "bridge": os.getenv("VAGRANT_BRIDGE") or None,
             "scan_root": os.getenv("VAGRANT_SCAN_ROOT") or None,
+            "gateway": os.getenv("VAGRANT_GATEWAY") or None,
         }]
 
     try:
@@ -106,6 +110,14 @@ def load_hosts() -> Dict[str, VagrantHost]:
         workdir = (entry.get("workdir") or DEFAULT_WORKDIR).rstrip("/") or "/"
         scan_root = (entry.get("scan_root") or workdir).rstrip("/") or "/"
 
+        # 호스트별 gateway 가 없으면 전체 기본값(VAGRANT_GATEWAY)을 쓴다. 둘 다 없으면 기본 경로를 바꾸지 않는다.
+        gateway = str(entry.get("gateway") or os.getenv("VAGRANT_GATEWAY") or "").strip() or None
+        if gateway:
+            try:
+                gateway = str(ipaddress.IPv4Address(gateway))
+            except ValueError as e:
+                raise ValueError(f"VAGRANT_HOSTS 의 '{name}' 의 gateway 가 올바른 IPv4 주소가 아닙니다: {gateway!r}") from e
+
         hosts[name.lower()] = VagrantHost(
             name=name,
             runner=build_runner(
@@ -120,6 +132,7 @@ def load_hosts() -> Dict[str, VagrantHost]:
             bridge=entry.get("bridge") or None,
             default_project=default_project,
             scan_root=scan_root,
+            gateway=gateway,
         )
 
         # 응답(오류 메시지 등)에서 이 호스트의 주소, 경로, 계정명을 가리기 위해 등록한다.

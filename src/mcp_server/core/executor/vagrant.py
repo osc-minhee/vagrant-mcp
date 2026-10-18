@@ -284,12 +284,6 @@ class VagrantExecutor(InfraExecutor):
         script = _DESTROY_SCRIPT.replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
         return await self._run(host, resource_id, "destroy", script)
 
-    async def is_ip_in_use(self, host: VagrantHost, ip: str) -> bool:
-        """
-        해당 Vagrant 호스트에서 ping 으로 IP 사용 여부를 확인한다. (DB 밖에서 쓰고 있는 IP 를 피하기 위함)
-        """
-        result = await host.runner.run(f"ping -c1 -W1 {ip} >/dev/null 2>&1", timeout=10)
-        return result.exit_code == 0
 
     @staticmethod
     def _kv(text: str) -> Dict[str, str]:

@@ -49,7 +49,7 @@ MCP Tools와 같은 비즈니스 로직과 인프라 제어 로직(Vagrant/Ansib
 ### Sequence Architecture
 1. 요청 수신: MCP Client가 MCP Tool을 호출하면, MCP Server가 이를 수신합니다.
 2. 리소스 등록: 데이터베이스에 새로운 리소스 정보를 기록하고 상태를 `PENDING`으로 마킹합니다.
-3. 자원 할당: `VAGRANT_IP_RANGE` 에서 DB 에 없고 ping 응답이 없는 IP 를 골라 `PROVISIONING` 으로 바꿉니다. 할당에 실패하면 기록을 지우고 오류를 반환합니다.
+3. 자원 할당: 호스트 IP 대역에서 DB, 호스트의 Vagrantfile, 실행 중인 VirtualBox VM 이 쓰지 않는 IP 를 골라 `PROVISIONING` 으로 바꿉니다. 할당에 실패하면 기록을 지우고 오류를 반환합니다.
 4. 비동기 실행: Server는 응답을 먼저 반환하고, 백그라운드에서 Vagrantfile 을 렌더링해 호스트의 `{VAGRANT_WORKDIR}/{resource_id}/` 에 쓴 뒤 `vagrant up` 을 실행합니다.
 5. 환경 구성: `CONFIGURING` 으로 바꾸고 VM 의 고정 IP 로 Ansible Playbook 을 실행합니다.
 6. 완료 처리: 모든 작업이 끝나면 `RUNNING`, 실패하면 `ERROR` 로 바꾸고 원인을 `metadata.last_error` 에 남깁니다.
@@ -164,6 +164,7 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
 | `default_project` | `vg_create_vm` 에서 `project` 를 비웠을 때 쓸 프로젝트 폴더 (예: `openwebui`). 없으면 `VAGRANT_DEFAULT_PROJECT`, 그것도 없으면 workdir 바로 아래 |
 | `ip_ranges` | VM 에 줄 고정 IP 대역 목록. 호스트끼리 겹치지 않게 지정 |
 | `scan_root` | IP 를 고를 때 이 폴더 아래(최대 6단계) Vagrantfile 의 IP 를 사용 중으로 봅니다 (기본: `workdir`) |
+| `gateway` | `ip_ranges` 네트워크의 게이트웨이. VM 을 만들 때 Ansible 이 기본 경로를 여기로 잡습니다(NAT 기본 경로보다 우선, Ubuntu 는 netplan, Rocky 는 NetworkManager 에 저장해 재부팅해도 유지). 없으면 `VAGRANT_GATEWAY`, 그것도 없으면 Vagrant 기본(NAT)이라 **같은 대역에서만 접속되고 VPN 등 다른 대역에서는 접속되지 않습니다**. 설정 전에 만든 VM 에는 적용되지 않습니다 |
 | `bridge` | 브리지할 호스트 NIC 이름 |
 | `ssh_key`, `ssh_password` | 호스트별 접속 인증 (없으면 공통 설정) |
 
@@ -174,7 +175,10 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
   1. 이 서버 DB 에 기록된 IP
   2. **그 호스트**의 `scan_root` 아래 Vagrantfile 에 적힌 IP (꺼진 VM, 다른 사람이 만든 VM 포함)
   3. **그 호스트**에서 SSH 계정으로 실행 중인 VirtualBox VM 의 IP (Guest Additions 가 있는 VM)
-  4. 그 호스트에서 ping 응답이 있는 IP
+
+  네트워크의 다른 장비(PC, 다른 서버)는 확인하지 않습니다. `ip_ranges` 는 이 서버 전용 구간으로 잡아 주세요. `vg_check_ip` 로 같은 기준의 확인만 따로 할 수 있습니다.
+- `ip` 는 전체 IP 대신 끝자리(`75`, `*.*.*.75`)로도 줄 수 있습니다. 사용자 메시지의 IP 를 LLM 앞단(LiteLLM 등)에서 가리는 환경을 위한 것으로, 서버가 호스트 IP 대역에서 끝자리가 같은 IP 를 찾습니다 (여러 호스트에 있으면 host 를 지정해야 합니다).
+- Ansible 은 접속한 머신의 hostname 이 VM 이름과 같은지 먼저 확인합니다. 다르면 IP 충돌로 보고 아무것도 바꾸지 않고 ERROR 로 남깁니다.
 - `vg_create_vm` 에서 `ip` 를 지정하면 자동 할당 대신 그 IP 를 씁니다. 그 호스트의 `ip_ranges` 안이어야 하고, 위 1~4 에 걸리면 다른 IP 로 바꾸지 않고 이유를 담아 거절합니다. 생성 후에는 IP 를 바꿀 수 없습니다.
 - 다른 계정으로 띄운 VM, `scan_root` 밖의 Vagrantfile, IP 를 계산해서 넣는 Vagrantfile(`"10.0.0.#{i}"`)은 확인하지 못합니다. `ip_ranges` 는 이 서버 전용 구간으로 두는 것이 가장 안전합니다.
 - 동시 실행 수(`VAGRANT_MAX_PARALLEL`)는 호스트마다 적용됩니다.
@@ -265,6 +269,7 @@ cd src && SECRETS_DIR=../secrets python -m mcp_server.main
 | `vg_destroy_vm` | `vagrant destroy -f` 후 VM 폴더 삭제 |
 | `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 (DB 기록 기준). `host`, `state` 로 거르기 |
 | `vg_get_vm` | VM 1대의 기록 + 호스트 VirtualBox 의 실제 상태(`actual`). 기록은 RUNNING 인데 실제로 꺼져 있거나 없거나 사양이 다르면 `mismatch` |
+| `vg_check_ip` | IP 를 쓸 수 있는지 확인 (생성과 같은 기준, 읽기 전용). ip 를 비우면 비어 있는 IP 목록. ip 는 전체 IP 또는 끝자리(`75`) |
 | `vg_list_host_vms` | 호스트의 VM 전체(이 서버가 만들지 않은 VM, 다른 계정의 VM 포함). `scan_root` 아래 Vagrantfile 과 `.vagrant` 기록, 실행 중인 VirtualBox 프로세스(모든 계정), SSH 계정의 VirtualBox 목록을 VM UUID 로 합칩니다. 프로젝트 폴더, 머신, 소유 계정, 상태, IP, `managed`(이 서버가 만든 VM 인지). 다른 계정의 꺼진 VM 은 `not_running` 으로만 보이고, 읽기 권한이 없는 폴더는 찾지 못합니다. 계정명은 별칭(`server-account`, `user-1` …)으로 가리며 폴더/VM 이름 안의 계정명도 같은 별칭으로 바꿉니다 |
 
 ```markdown

@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from mcp_server.core.base import ResourceProvisioner
 from mcp_server.core.constants import APP_DIR, SECRETS_DIR, CloudProvider, Flavor, Image
 from mcp_server.core.executor.ansible import AnsibleExecutor
@@ -179,23 +179,89 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 f"호스트 '{host.name}' 에서 사용 중인 IP 를 확인하지 못해 생성하지 않았습니다: {type(e).__name__}: {e}"
             )) from e
 
-    async def _ip_busy_reason(self, host: VagrantHost, ip: str, used: set, on_host: Dict[str, str]) -> Optional[str]:
+    def _resolve_target(self, name: Optional[str], ip_spec: Optional[str]) -> Tuple[VagrantHost, Optional[str]]:
         """
-        ip 를 쓸 수 없는 이유. 쓸 수 있으면 None.
+        호스트와 요청한 IP 를 정한다. ip_spec 은 전체 IP 또는 끝자리(75, *.*.*.75)다.
+        끝자리면 host 를 줬을 때는 그 호스트 대역에서, 아니면 모든 호스트 대역에서 끝자리가 같은 IP 를 찾는다.
         """
-        if ip in used:
-            return "이 서버가 만든 다른 VM 에 할당되어 있습니다"
-        if ip in on_host:
-            return _ON_HOST_REASONS.get(on_host[ip], f"{on_host[ip]} 에서 사용 중입니다")
-        if await self.infra_executor.is_ip_in_use(host, ip):
-            return "ping 응답이 있습니다 (다른 장비가 쓰고 있을 수 있습니다)"
-        return None
+        if not ip_spec:
+            return self._resolve_host(name), None
+
+        spec = ip_spec.strip()
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", spec):
+            try:
+                ip = str(ipaddress.IPv4Address(spec))
+            except ValueError as e:
+                raise ValueError(f"IP 형식이 올바르지 않습니다: {spec}") from e
+            return self._resolve_host(name, ip), ip
+
+        octet = int(spec.rsplit(".", 1)[-1])
+        if octet > 255:
+            raise ValueError(f"IP 끝자리는 0~255 여야 합니다: {spec}")
+        hosts = [self._resolve_host(name)] if name else list(HOSTS.values())
+        matches = [(h, ip) for h in hosts for ip in h.ip_pool if ip.rsplit(".", 1)[1] == str(octet)]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            ranges = "; ".join(f"{h.name}: {_pool_ranges(h.ip_pool) or '대역 없음'}" for h in hosts)
+            raise ValueError(f"끝자리가 {octet} 인 IP 가 IP 대역에 없습니다. ({ranges})")
+        raise ValueError(
+            f"끝자리가 {octet} 인 IP 가 여러 호스트에 있습니다: "
+            + ", ".join(f"{h.name} {ip}" for h, ip in matches) + ". host 를 지정하세요."
+        )
+
+    async def _ip_usage(self, host: VagrantHost, candidates: List[str]) -> Dict[str, str]:
+        """
+        candidates 중 쓸 수 없는 IP 를 {IP: 이유} 로 돌려준다. 확인 기준 (생성, vg_check_ip 공통):
+        1) 이 서버 DB 에 기록된 IP  2) 그 호스트 scan_root 아래 Vagrantfile 의 IP  3) 그 호스트에서 실행 중인 VirtualBox VM 의 IP
+        네트워크의 다른 장비(ping 등)는 보지 않는다. 호스트를 조회하지 못하면 RuntimeError (모르는 채로 쓰지 않는다).
+        """
+        used = await get_used_values(self.provider_name(), self.resource_type(), "ip")
+        on_host = await self._host_used_ips(host)
+
+        busy: Dict[str, str] = {}
+        for ip in candidates:
+            if ip in used:
+                busy[ip] = "이 서버가 만든 다른 VM 에 할당되어 있습니다"
+            elif ip in on_host:
+                busy[ip] = _ON_HOST_REASONS.get(on_host[ip], f"{on_host[ip]} 에서 사용 중입니다")
+        return busy
+
+    async def check_ip(self, host: Optional[str] = None, ip: Optional[str] = None) -> Dict[str, Any]:
+        """
+        IP 를 쓸 수 있는지 확인한다. (읽기 전용, 생성 때와 같은 기준)
+        ip 를 주면 그 IP 하나의 available/reason, 없으면 그 호스트 대역에서 비어 있는 IP 를 구간으로 묶어 돌려준다.
+        확인한 뒤 다른 요청이 먼저 가져갈 수 있으므로, 실제 생성 때 한 번 더 확인한다.
+        """
+        target, requested = self._resolve_target(host, ip)
+        if not target.ip_pool:
+            raise RuntimeError(f"호스트 '{target.name}' 에 IP 대역(ip_range)이 설정되지 않았습니다.")
+        result: Dict[str, Any] = {"host": target.name, "ip_ranges": _pool_ranges(target.ip_pool)}
+
+        if requested:
+            result["ip"] = requested
+            if requested not in target.ip_pool:
+                result.update(available=False, reason=f"호스트 '{target.name}' 의 IP 대역 밖입니다")
+                return result
+            reason = (await self._ip_usage(target, [requested])).get(requested)
+            result["available"] = reason is None
+            if reason:
+                result["reason"] = reason
+            return result
+
+        busy = await self._ip_usage(target, target.ip_pool)
+        free = [candidate for candidate in target.ip_pool if candidate not in busy]
+        result.update(
+            total=len(target.ip_pool),
+            available_count=len(free),
+            available_ranges=_pool_ranges(free),
+            unavailable_count=len(busy),
+        )
+        return result
 
     async def _allocate_ip(self, host: VagrantHost, requested: Optional[str] = None) -> str:
         """
-        그 호스트의 ip_range 안에서 다음을 모두 피한 첫 IP 를 고른다.
-        1) 이 서버 DB 에 기록된 IP  2) 그 호스트 scan_root 아래 Vagrantfile 의 IP  3) 그 호스트에서 실행 중인 VirtualBox VM 의 IP
-        4) 그 호스트에서 ping 응답이 있는 IP
+        그 호스트의 ip_range 안에서 _ip_usage 기준으로 비어 있는 첫 IP 를 고른다.
         requested 가 있으면 그 IP 하나만 같은 기준으로 확인하고, 대역 밖이거나 사용 중이면 오류를 낸다. (다른 IP 로 바꾸지 않는다)
         """
         if not host.ip_pool:
@@ -205,19 +271,16 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 f"IP {requested} 는 호스트 '{host.name}' 의 IP 대역 밖이라 쓸 수 없습니다. (대역: {_pool_ranges(host.ip_pool)})"
             )
 
-        used = await get_used_values(self.provider_name(), self.resource_type(), "ip")
-        on_host = await self._host_used_ips(host)
-
         if requested:
-            reason = await self._ip_busy_reason(host, requested, used, on_host)
+            reason = (await self._ip_usage(host, [requested])).get(requested)
             if reason:
                 raise RuntimeError(f"IP {requested} 는 사용할 수 없습니다: {reason}. 다른 IP 를 지정하거나 비워서 자동 할당하세요.")
             return requested
 
+        busy = await self._ip_usage(host, host.ip_pool)
         for ip in host.ip_pool:
-            reason = await self._ip_busy_reason(host, ip, used, on_host)
-            if reason:
-                self.logger.info(f"[{host.name}] {ip} 는 건너뜁니다: {reason}")
+            if ip in busy:
+                self.logger.info(f"[{host.name}] {ip} 는 건너뜁니다: {busy[ip]}")
                 continue
             return ip
 
@@ -266,8 +329,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
             )
 
     async def prepare_data(self, params: VagrantVMCreateInput) -> ProvisioningManifest:
-        ip = str(params.ip) if params.ip else None
-        host = self._resolve_host(params.host, ip)
+        # 끝자리(75)로 준 ip 는 여기서 전체 IP 로 바뀐다.
+        host, ip = self._resolve_target(params.host, params.ip)
         spec = FLAVOR_SPECS[params.flavor]
         # 요청의 cpu 가 있으면 flavor 의 vCPU 대신 쓴다. 메모리는 flavor 로만 정한다.
         cpu = params.cpu or spec["cpu"]
@@ -280,9 +343,11 @@ class VagrantVMProvisioner(ResourceProvisioner):
             # 요청의 project, 없으면 호스트의 기본 프로젝트. 둘 다 없으면 None (workdir 바로 아래)
             "project": params.project or host.default_project,
             # 요청의 ip(대역 안이고 비어 있어야 함), 없으면 대역에서 자동 할당
-            "ip": await self._allocate_ip(host, vars.get("ip")),
+            "ip": await self._allocate_ip(host, ip),
             **IMAGE_BOXES[params.image],
             "bridge": host.bridge,
+            # 있으면 Ansible 이 VM 기본 경로를 이 게이트웨이로 잡는다 (VPN 등 다른 대역에서 접속 가능)
+            "gateway": host.gateway,
         })
         return ProvisioningManifest(vars=vars)
 
@@ -313,6 +378,11 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
     def config_target(self, name: str, manifest: ProvisioningManifest) -> Optional[str]:
         return manifest.vars.get("ip")
+
+    def config_vars(self, name: str, manifest: ProvisioningManifest) -> Dict[str, Any]:
+        # 호스트 설정에 gateway 가 있으면 playbook 이 VM 의 기본 경로를 그쪽으로 잡는다. (VPN 등 다른 대역에서 접속)
+        gateway = manifest.vars.get("gateway")
+        return {"vm_gateway": gateway} if gateway else {}
 
     def _format(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -504,7 +574,7 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 "managed_vms_by_state": by_state,
                 "ip_pool_total": len(host.ip_pool),
             }
-            # 남은 IP: 대역 중 DB 에도 없고, 그 호스트의 Vagrantfile/실행 중 VM 에서도 쓰지 않는 IP 수 (ping 확인 전)
+            # 남은 IP: 대역 중 DB 에도 없고, 그 호스트의 Vagrantfile/실행 중 VM 에서도 쓰지 않는 IP 수 (생성/vg_check_ip 와 같은 기준)
             others = {ip for ip in host.ip_pool if ip not in used_ips and on_host and ip in on_host}
             item["ip_available"] = sum(1 for ip in host.ip_pool if ip not in used_ips and ip not in others)
             # 대역 안인데 이 서버가 만들지 않은 VM 이 쓰고 있는 IP 수. 0 이 아니면 대역이 다른 VM 과 겹친다.

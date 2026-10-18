@@ -6,10 +6,22 @@
 
   # Debian/Ubuntu(apt) 와 RedHat 계열(Rocky, dnf)을 지원한다.
   pre_tasks:
+    # IP 로 접속하므로, 그 IP 를 다른 장비가 쓰고 있으면(IP 충돌) 엉뚱한 머신을 설정하게 된다.
+    # Vagrantfile 이 hostname 을 VM 이름으로 정하므로, 다르면 아무것도 바꾸지 않고 멈춘다.
+    - name: "대상 VM 확인 (IP 충돌 방지)"
+      assert:
+        that: ansible_facts['hostname'] == mcp_target_name
+        fail_msg: >-
+          IP {{ inventory_hostname }} 로 접속한 머신의 hostname 이 '{{ ansible_facts['hostname'] }}' 입니다
+          ('{{ mcp_target_name }}' 이어야 합니다). 이 IP 를 다른 장비가 쓰고 있습니다(IP 충돌).
+          VM 을 삭제하고 다른 IP 로 다시 만드세요.
+        quiet: true
+      when: mcp_target_name is defined
+
     - name: "지원 OS 확인"
       assert:
-        that: ansible_os_family in ["Debian", "RedHat"]
-        fail_msg: "base.yml 은 Debian/Ubuntu, RedHat(Rocky) 계열만 지원합니다 (현재: {{ ansible_distribution }})."
+        that: ansible_facts['os_family'] in ["Debian", "RedHat"]
+        fail_msg: "base.yml 은 Debian/Ubuntu, RedHat(Rocky) 계열만 지원합니다 (현재: {{ ansible_facts['distribution'] }})."
 
   tasks:
     # ---------- 패키지 ----------
@@ -17,28 +29,28 @@
       apt:
         update_cache: yes
         cache_valid_time: 3600
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "시스템 패키지 업그레이드 (Optional, Debian)"
       apt:
         upgrade: dist
-      when: ansible_os_family == "Debian" and (upgrade_system | default(false))
+      when: ansible_facts['os_family'] == "Debian" and (upgrade_system | default(false))
 
     - name: "시스템 패키지 업그레이드 (Optional, RedHat)"
       dnf:
         name: "*"
         state: latest
-      when: ansible_os_family == "RedHat" and (upgrade_system | default(false))
+      when: ansible_facts['os_family'] == "RedHat" and (upgrade_system | default(false))
 
     - name: "EPEL 저장소 설치 (htop 등, RedHat)"
       dnf:
         name: epel-release
         state: present
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: "필수 공통 패키지 설치"
       package:
-        name: "{{ common_packages + (common_packages_debian if ansible_os_family == 'Debian' else common_packages_redhat) }}"
+        name: "{{ common_packages + (common_packages_debian if ansible_facts['os_family'] == 'Debian' else common_packages_redhat) }}"
         state: present
       register: package_result
 
@@ -47,7 +59,7 @@
       alternatives:
         name: editor
         path: /usr/bin/vim.basic
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "Vim을 기본 편집기로 설정 (RedHat)"
       copy:
@@ -56,7 +68,7 @@
           export EDITOR=vim
           export VISUAL=vim
         mode: "0644"
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: "타임존 설정 (Asia/Seoul)"
       timezone:
@@ -66,7 +78,7 @@
       locale_gen:
         name: ko_KR.UTF-8
         state: present
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "시스템 기본 로케일을 ko_KR.UTF-8로 설정 (Debian)"
       debconf:
@@ -74,18 +86,18 @@
         question: locales/default_environment_locale
         value: ko_KR.UTF-8
         vtype: select
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "에러 메시지를 영어로 설정 (Debian)"
       lineinfile:
         path: /etc/default/locale
         line: 'LC_MESSAGES="en_US.UTF-8"'
         regexp: '^LC_MESSAGES='
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "로케일 설정 즉시 적용 (Debian)"
       shell: update-locale LANG=ko_KR.UTF-8
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: "시스템 로케일 설정 (RedHat): 기본 ko_KR.UTF-8, 에러 메시지는 영어"
       copy:
@@ -94,7 +106,7 @@
           LANG=ko_KR.UTF-8
           LC_MESSAGES=en_US.UTF-8
         mode: "0644"
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     # ---------- SSH 비밀번호 로그인 (내부망 테스트/시연용, group_vars 의 ssh_password_auth) ----------
     # 브리지 네트워크라 같은 LAN 에서 누구나 접속을 시도할 수 있다. 외부에 노출되는 망에서는 끈다.
@@ -145,11 +157,68 @@
 
     - name: "기본 패키지 설치 결과 출력"
       debug:
-        msg: "설치된 패키지: {{ common_packages + (common_packages_debian if ansible_os_family == 'Debian' else common_packages_redhat) }}"
+        msg: "설치된 패키지: {{ common_packages + (common_packages_debian if ansible_facts['os_family'] == 'Debian' else common_packages_redhat) }}"
       when: package_result.changed
+
+    # ---------- 기본 경로 (호스트 설정의 gateway, MCP 서버가 vm_gateway 로 넘긴다) ----------
+    # Vagrant 는 기본 경로를 NAT(10.0.2.2) 쪽에 둔다. 그러면 다른 대역(VPN 등)에서 bridge IP 로 들어온 접속의 응답이
+    # NAT 로 나가 접속되지 않는다. bridge 인터페이스에 우선순위가 더 높은(metric 10) 기본 경로를 추가한다.
+    # NAT 쪽 기본 경로(metric 100)는 그대로 두므로 vagrant ssh 는 영향이 없다.
+    # 재부팅해도 남도록 Ubuntu 는 netplan, Rocky 는 NetworkManager 설정에 저장하고, 지금 실행 중인 VM 에는 바로 적용한다.
+    # (Ansible 은 같은 대역에서 접속하므로 기본 경로를 바꿔도 이 접속은 끊기지 않는다)
+    - name: "bridge 인터페이스 찾기 (Ansible 이 접속한 IP 가 붙은 인터페이스)"
+      shell: ip -o -4 addr show | awk -v ip="{{ inventory_hostname }}" '{split($4, a, "/"); if (a[1] == ip) print $2}'
+      register: bridge_iface
+      changed_when: false
+      failed_when: bridge_iface.stdout | trim == ""
+      when: vm_gateway | default('', true) | length > 0
+
+    - name: "기본 경로 저장 (Debian/Ubuntu: netplan)"
+      copy:
+        dest: /etc/netplan/60-mcp-default-route.yaml
+        mode: "0600"
+        content: |
+          # vagrant-mcp 가 만든 파일: bridge 네트워크를 기본 경로로 쓴다 (NAT 기본 경로보다 우선)
+          network:
+            version: 2
+            ethernets:
+              {{ bridge_iface.stdout | trim }}:
+                routes:
+                  - to: 0.0.0.0/0
+                    via: {{ vm_gateway }}
+                    metric: 10
+      when:
+        - vm_gateway | default('', true) | length > 0
+        - ansible_facts['os_family'] == "Debian"
+
+    # 적용(netplan apply)은 하지 않는다. 파일이 잘못되면 다음 부팅 때 네트워크가 깨지므로 문법만 미리 확인한다.
+    - name: "netplan 설정 확인"
+      command: netplan generate
+      changed_when: false
+      when:
+        - vm_gateway | default('', true) | length > 0
+        - ansible_facts['os_family'] == "Debian"
+
+    - name: "기본 경로 저장 (RedHat: NetworkManager)"
+      shell: |
+        con="$(nmcli -g GENERAL.CONNECTION device show {{ bridge_iface.stdout | trim }})"
+        [ -n "$con" ] || { echo "{{ bridge_iface.stdout | trim }} 의 NetworkManager 연결을 찾지 못했습니다." >&2; exit 1; }
+        nmcli -g ipv4.routes connection show "$con" | grep -q "{{ vm_gateway }}" && exit 0
+        nmcli connection modify "$con" +ipv4.routes "0.0.0.0/0 {{ vm_gateway }} 10"
+        echo changed
+      register: nm_route_result
+      changed_when: "'changed' in nm_route_result.stdout"
+      when:
+        - vm_gateway | default('', true) | length > 0
+        - ansible_facts['os_family'] == "RedHat"
+
+    - name: "기본 경로 바로 적용"
+      command: ip route replace default via {{ vm_gateway }} dev {{ bridge_iface.stdout | trim }} metric 10
+      changed_when: true
+      when: vm_gateway | default('', true) | length > 0
 
   handlers:
     - name: restart sshd
       service:
-        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        name: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
         state: restarted
