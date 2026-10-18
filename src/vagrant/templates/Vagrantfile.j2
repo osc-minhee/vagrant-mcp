@@ -9,6 +9,9 @@ Vagrant.configure("2") do |config|
   config.vm.define "{{ name }}"
   # 부팅 후 SSH 로 접속될 때까지 기다리는 시간(초). 호스트가 바쁘거나 첫 부팅이 느린 이미지면 늘린다 (VAGRANT_BOOT_TIMEOUT)
   config.vm.boot_timeout = {{ boot_timeout }}
+  # 기본 공유 폴더(/vagrant)는 쓰지 않는다 (설정은 Ansible 이 SSH 로 한다).
+  # 켜 두면 Guest Additions(vboxsf)가 없거나 커널과 안 맞는 박스(Rocky 등)에서 vagrant up 이 실패한다.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
 
   # MCP Server(Ansible)가 접속할 수 있도록 브리지 네트워크에 고정 IP 를 준다.
 {% if bridge %}
