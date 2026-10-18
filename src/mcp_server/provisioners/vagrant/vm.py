@@ -373,7 +373,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
         await self._check_dir_free(
             host, project, params.dir_name or resource_id, resource_id, check_host=bool(params.dir_name)
         )
-        vars = params.model_dump(mode="json")
+        # 만든 사람(user)은 DB 의 created_by 에 따로 남기므로 vars 에 넣지 않는다.
+        vars = params.model_dump(mode="json", exclude={"user"})
         vars.update(spec)
         vars["cpu"] = cpu
         vars.update({

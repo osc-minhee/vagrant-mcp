@@ -9,6 +9,9 @@ PURPOSE_PATTERN = r"^[A-Za-z0-9_-]{1,32}$"
 # IP 지정: 전체 IP(192.168.0.75) 또는 끝자리(75, *.*.*.75, x.x.x.75).
 # 사용자 메시지의 IP 가 LLM 앞단에서 가려질 수 있어, 끝자리만으로도 호스트 IP 대역에서 찾을 수 있게 한다.
 IP_SPEC_PATTERN = r"^(\d{1,3}(\.\d{1,3}){3}|\d{1,3}|([*xX]+\.){3}\d{1,3})$"
+USER_DESCRIPTION = (
+    "요청한 사용자 이름. 대화에서 사용자 이름을 알 수 있을 때만 넣고, 모르면 비운다. 지어내거나 사용자에게 묻지 않는다."
+)
 IP_SPEC_DESCRIPTION = (
     "전체 IP(예: 192.168.0.75) 또는 끝자리(예: 75). 끝자리를 주면 호스트 IP 대역에서 끝자리가 같은 IP 를 찾는다. "
     "사용자 메시지의 IP 가 가려져 보이면(마스킹) 지어내지 말고 사용자에게 끝자리를 물어본다."
@@ -45,6 +48,7 @@ class VagrantVMCreateInput(BaseModel):
         "VM 고정 IP. 사용자가 특정 IP 를 말했을 때만 넣고, 아니면 비운다(호스트 IP 대역에서 자동 할당). "
         + IP_SPEC_DESCRIPTION + " 호스트의 IP 대역(ip_ranges) 안의 IP 만 쓸 수 있다. 이미 만든 VM 의 IP 는 바꿀 수 없다."
     ))
+    user: Optional[str] = Field(None, max_length=64, description=USER_DESCRIPTION + " VM 을 만든 사람(created_by)으로 기록된다.")
 
 class VagrantVMUpdateInput(BaseModel):
     name: str = Field(..., pattern=NAME_PATTERN, description=(
@@ -64,3 +68,4 @@ class VagrantVMDestroyInput(BaseModel):
     name: str = Field(..., pattern=NAME_PATTERN, description=(
         "VM 이름(예: sandbox-01)"
     ))
+    user: Optional[str] = Field(None, max_length=64, description=USER_DESCRIPTION + " 만든 사람과 다르면 응답에 알림이 붙는다(삭제는 진행된다).")

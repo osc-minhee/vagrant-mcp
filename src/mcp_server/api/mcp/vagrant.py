@@ -28,7 +28,8 @@ vg_vm = ProvisionerRegistry.get_provisioner(CloudProvider.VAGRANT, "vm")
     "5. ip 는 사용자가 특정 IP 를 말했을 때만 넣는다. 전체 IP 또는 끝자리(예: 75)를 넣을 수 있다. "
     "사용자 메시지의 IP 가 가려져 보이면(마스킹) 지어내지 말고 끝자리를 물어본다. "
     "호스트 IP 대역 안의 IP 만 쓸 수 있고, 대역 밖이거나 사용 중이면 이유(와 대역)가 오류로 온다. "
-    "그대로 전하고 다른 IP 를 받거나 비워서(자동 할당) 다시 호출한다. 미리 확인하려면 vg_check_ip 를 쓴다."
+    "그대로 전하고 다른 IP 를 받거나 비워서(자동 할당) 다시 호출한다. 미리 확인하려면 vg_check_ip 를 쓴다.\n"
+    "6. user 는 대화에서 사용자 이름을 알 수 있을 때만 넣는다(만든 사람 created_by 로 기록된다). 모르면 비우고 묻지 않는다."
 ))
 async def vg_create_vm(params: VagrantVMCreateInput):
     return await vg_vm.create(params)
@@ -58,7 +59,8 @@ async def vg_update_vm(params: VagrantVMUpdateInput):
 
 @router.post("/vg_destroy_vm", operation_id="vg_destroy_vm", description=(
     "특정 이름의 Vagrant VM을 영구 삭제하는 도구이다(vagrant destroy + 폴더 삭제). 되돌릴 수 없다.\n"
-    "반드시 사용자에게 삭제할 VM 이름을 보여주고 확인을 받은 뒤 호출한다."
+    "반드시 사용자에게 삭제할 VM 이름과 만든 사람(vg_get_vm/vg_list_vm 의 created_by, 없으면 '기록 없음')을 보여주고 확인을 받은 뒤 호출한다.\n"
+    "user 는 대화에서 사용자 이름을 알 수 있을 때만 넣는다. 만든 사람과 달라도 삭제는 진행되며, 응답 message 의 ⚠️ 알림을 그대로 사용자에게 전한다."
 ))
 async def vg_destroy_vm(params: VagrantVMDestroyInput):
     return await vg_vm.destroy(params)
@@ -89,7 +91,7 @@ async def vg_list_host_vms(
     return await vg_vm.list_host_vms(host)
 
 @router.get("/vg_list_vm", operation_id="vg_list_vm", description=(
-    "이 서버가 Vagrant로 생성한 전체 VM 목록(host, project, image 포함)과 상태(PENDING, PROVISIONING, CONFIGURING, RUNNING, ERROR, DESTROYING)를 조회하는 도구이다.\n"
+    "이 서버가 Vagrant로 생성한 전체 VM 목록(host, project, image, created_by(만든 사람, 기록이 없으면 null) 포함)과 상태(PENDING, PROVISIONING, CONFIGURING, RUNNING, ERROR, DESTROYING)를 조회하는 도구이다.\n"
     "ERROR 상태면 last_error 에 원인이 담겨 있다. 사용자가 호스트나 상태를 말했을 때만 host, state 로 거른다.\n"
     "이 서버의 기록 기준이므로, VM 이 실제로 떠 있는지는 vg_get_vm 으로 확인한다.\n"
     "상태는 백그라운드 작업으로 계속 바뀐다. 사용자가 목록이나 상태를 물을 때마다 반드시 다시 호출하고, 앞서 받은 결과를 재사용하지 않는다. "

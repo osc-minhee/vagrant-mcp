@@ -40,6 +40,14 @@ def _where(manifest: ProvisioningManifest) -> str:
     parts = [str(manifest.vars[k]) for k in ("host", "ip") if manifest.vars.get(k)]
     return f" ({', '.join(parts)})" if parts else ""
 
+def _owner_note(created_by: Optional[str], requested_by: Optional[str]) -> str:
+    # 삭제 요청자와 만든 사람이 다르면 알릴 문구. 같거나 한쪽을 모르면 빈 문자열.
+    if not created_by or not requested_by:
+        return ""
+    if created_by.strip().lower() == requested_by.strip().lower():
+        return ""
+    return f"이 리소스는 '{created_by}' 가 만들었습니다. (삭제 요청: '{requested_by}')"
+
 class ResourceProvisioner(ABC):
     """
     처리 순서 흐름을 정해둔 틀 
@@ -118,7 +126,7 @@ class ResourceProvisioner(ABC):
 
         # LIFECYCLE - PENDING
         try:
-            await self.register_resource(resource_id, params.name, ResourceState.PENDING)
+            await self.register_resource(resource_id, params.name, ResourceState.PENDING, created_by=getattr(params, "user", None))
         except IntegrityError:
             self.logger.info(f"[{resource_id}] 중복 요청 감지 (Unique 제약 조건 위반).")
             existing = await db_service.get_resource(resource_id)
@@ -249,15 +257,18 @@ class ResourceProvisioner(ABC):
             raise RuntimeError(f"'{params.name}' 는 현재 작업 중이라 삭제할 수 없습니다. 작업이 끝난 뒤 다시 시도하세요.")
 
         manifest = ProvisioningManifest.model_validate(json.loads(resource["metadata"] or "{}"))
-        _spawn(self._run_destroy(resource_id, manifest))
+        # 만든 사람과 요청한 사람이 달라도 막지 않고 알리기만 한다.
+        note = _owner_note(resource.get("created_by"), getattr(params, "user", None))
+        _spawn(self._run_destroy(resource_id, manifest, note))
 
         return {
             "success": True,
             "resource_id": resource_id,
-            "message": f"'{params.name}' 삭제 프로세스를 시작했습니다."
+            "created_by": resource.get("created_by"),
+            "message": f"'{params.name}' 삭제 프로세스를 시작했습니다." + (f"\n⚠️ {note}" if note else ""),
         }
 
-    async def _run_destroy(self, resource_id: str, manifest: ProvisioningManifest):
+    async def _run_destroy(self, resource_id: str, manifest: ProvisioningManifest, note: str = ""):
         try:
             self.logger.info(f"[{resource_id}] 리소스 삭제 프로세스 시작...")
             ok, out, err = await self.infra_executor.destroy(resource_id, manifest.vars)
@@ -273,7 +284,10 @@ class ResourceProvisioner(ABC):
 
             await self.unregister_resource(resource_id)
             self.logger.info(f"[{resource_id}] 리소스 삭제 완료.")
-            await notify(f"🗑️ '{_label(resource_id, manifest)}' 삭제 완료{_where(manifest)}" + (f"\n⚠️ {message}" if message else ""))
+            await notify(
+                f"🗑️ '{_label(resource_id, manifest)}' 삭제 완료{_where(manifest)}"
+                + "".join(f"\n⚠️ {m}" for m in (note, message) if m)
+            )
 
         except Exception as e:
             self.logger.error(f"[{resource_id}] 삭제 실패: {e}")
@@ -288,11 +302,11 @@ class ResourceProvisioner(ABC):
             self.provider_name(), self.resource_type()
         )
 
-    async def register_resource(self, resource_id: str, name: str, state: ResourceState, metadata: Optional[dict] = None):
+    async def register_resource(self, resource_id: str, name: str, state: ResourceState, metadata: Optional[dict] = None, created_by: Optional[str] = None):
         """
         Provisioner가 호출할 리소스 상태 등록 Helper
         """
-        await db_service.register_new_resource(resource_id, name, self.provider_name(), self.resource_type(), state, metadata)
+        await db_service.register_new_resource(resource_id, name, self.provider_name(), self.resource_type(), state, metadata, created_by)
 
     async def update_state(self, resource_id: str, state: ResourceState, metadata: Optional[dict] = None):
         """
