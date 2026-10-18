@@ -33,6 +33,7 @@ async def init_db():
                 type TEXT NOT NULL, -- 리소스 유형(vm, lxc 등)
                 state TEXT NOT NULL, -- 리소스 상태(PENDING, RUNNING 등)
                 metadata TEXT, -- Provider별 식별 데이터 정보 (vars, last_error)
+                created_by TEXT, -- 만든 사람 (요청 때 받은 값, 없으면 NULL)
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP, -- 생성 시간
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP -- 갱신 시간
             );
@@ -45,8 +46,21 @@ async def init_db():
         """)
         await conn.commit()
 
+    await _migrate_columns()
     await _recover_orphaned_states()
     logger.info("데이터베이스 스키마 및 초기 설정이 완료되었습니다.")
+
+async def _migrate_columns():
+    """
+    이전 버전에서 만든 DB 에 없는 컬럼을 추가한다. (기존 행은 NULL)
+    """
+    async with get_db_connection() as conn:
+        async with conn.execute("PRAGMA table_info(resource)") as cursor:
+            columns = {row["name"] for row in await cursor.fetchall()}
+        if "created_by" not in columns:
+            await conn.execute("ALTER TABLE resource ADD COLUMN created_by TEXT")
+            await conn.commit()
+            logger.info("resource 테이블에 created_by 컬럼을 추가했습니다.")
 
 async def _recover_orphaned_states():
     """
@@ -89,7 +103,7 @@ async def get_used_values(provider: CloudProvider, resource_type: str, key: str)
             rows = await cursor.fetchall()
             return {str(row["value"]) for row in rows}
 
-async def register_new_resource(resource_id: str, name: str, provider: CloudProvider, resource_type: str, state: str, metadata: dict = None):
+async def register_new_resource(resource_id: str, name: str, provider: CloudProvider, resource_type: str, state: str, metadata: dict = None, created_by: str = None):
     """
     리소스 등록 함수.
     """
@@ -98,9 +112,9 @@ async def register_new_resource(resource_id: str, name: str, provider: CloudProv
 
     async with get_db_connection() as conn:
         await conn.execute("""
-            INSERT INTO resource (resource_id, name, provider, type, state, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (resource_id, name, str(provider), resource_type, str(state), json.dumps(metadata or {})))
+            INSERT INTO resource (resource_id, name, provider, type, state, metadata, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (resource_id, name, str(provider), resource_type, str(state), json.dumps(metadata or {}), created_by))
 
         await conn.commit()
 
@@ -159,7 +173,7 @@ async def get_resources_by_type(provider: CloudProvider, resource_type: str):
     """
     async with get_db_connection() as conn:
         async with conn.execute("""
-            SELECT resource_id, name, type, state, metadata, created_at, updated_at
+            SELECT resource_id, name, type, state, metadata, created_by, created_at, updated_at
             FROM resource
             WHERE provider = ? AND type = ?
             ORDER BY created_at
@@ -174,7 +188,7 @@ async def get_resource(resource_id: str) -> dict:
     """
     async with get_db_connection() as conn:
         async with conn.execute("""
-            SELECT resource_id, name, provider, type, state, metadata, created_at, updated_at
+            SELECT resource_id, name, provider, type, state, metadata, created_by, created_at, updated_at
             FROM resource
             WHERE resource_id = ?
         """, (resource_id,)) as cursor:
