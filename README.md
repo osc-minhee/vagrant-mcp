@@ -186,7 +186,9 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
 
 #### 프로젝트 폴더
 
-VM 은 `{workdir}/{project}/vg-<이름>` 에 만들어집니다. `project` 는 `vg_create_vm` 에서 사용자가 지정하고(영문/숫자/`._-`, 한 단계), 비우면 호스트의 `default_project` → `VAGRANT_DEFAULT_PROJECT` 순으로 씁니다. 둘 다 없으면 `{workdir}/vg-<이름>` 입니다. 생성 때 정해진 project 는 DB 에 기록되어 변경과 삭제가 같은 경로를 쓰므로, 이후에 기본값을 바꿔도 기존 VM 의 경로는 그대로입니다.
+VM 은 `{workdir}/{project}/{dir_name}` 에 만들어집니다. `project` 는 `vg_create_vm` 에서 사용자가 지정하고(영문/숫자/`._-`, 한 단계), 비우면 호스트의 `default_project` → `VAGRANT_DEFAULT_PROJECT` 순으로 씁니다. 둘 다 없으면 `{workdir}/{dir_name}` 입니다. 생성 때 정해진 project 는 DB 에 기록되어 변경과 삭제가 같은 경로를 쓰므로, 이후에 기본값을 바꿔도 기존 VM 의 경로는 그대로입니다.
+
+`dir_name`(VM 폴더 이름)도 `vg_create_vm` 에서 지정할 수 있습니다(영문/숫자/`._-`, 한 단계). 비우면 `vg-<이름>` 입니다. VirtualBox VM 이름은 지정한 폴더 이름과 상관없이 항상 `vg-<이름>` 입니다. 삭제는 VM 폴더를 통째로 지우므로, 이 서버의 다른 VM 이 쓰는 폴더나 **호스트에 이미 있는 폴더**는 지정할 수 없습니다.
 
 #### 응답에서 내부 정보 가리기
 

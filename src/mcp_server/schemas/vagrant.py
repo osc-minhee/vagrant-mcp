@@ -37,6 +37,10 @@ class VagrantVMCreateInput(BaseModel):
         "VM 폴더를 넣을 프로젝트 폴더 이름(영문/숫자/._- 만, 한 단계). 사용자가 말하지 않으면 비운다(호스트 기본 프로젝트). "
         "이미 만든 VM 의 프로젝트는 바꿀 수 없다."
     ))
+    dir_name: Optional[str] = Field(None, pattern=PROJECT_PATTERN, description=(
+        "VM 폴더 이름(영문/숫자/._- 만, 한 단계). 사용자가 폴더 이름을 말했을 때만 넣고, 아니면 비운다(vg-<name>). "
+        "호스트에 이미 있는 폴더나 다른 VM 이 쓰는 폴더는 쓸 수 없다. 이미 만든 VM 의 폴더는 바꿀 수 없다."
+    ))
     ip: Optional[str] = Field(None, pattern=IP_SPEC_PATTERN, description=(
         "VM 고정 IP. 사용자가 특정 IP 를 말했을 때만 넣고, 아니면 비운다(호스트 IP 대역에서 자동 할당). "
         + IP_SPEC_DESCRIPTION + " 호스트의 IP 대역(ip_ranges) 안의 IP 만 쓸 수 있다. 이미 만든 VM 의 IP 는 바꿀 수 없다."

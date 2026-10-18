@@ -20,6 +20,7 @@ vg_vm = ProvisionerRegistry.get_provisioner(CloudProvider.VAGRANT, "vm")
     "1. 필수는 name(소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, image=ubuntu-22.04, project=호스트 기본 프로젝트.\n"
     "   image 는 ubuntu-22.04, rocky-8, rocky-9 중 하나다 (사용자가 Rocky/CentOS 계열을 원하면 rocky-9).\n"
     "   cpu 는 사용자가 vCPU 개수를 말했을 때만 넣는다 (flavor 의 vCPU 대신 쓰이고, 메모리는 flavor 로 정해진다).\n"
+    "   dir_name 은 사용자가 VM 폴더 이름을 말했을 때만 넣는다 (비우면 vg-<name>). 이미 있는 폴더면 이유가 오류로 오니 다른 이름을 받는다.\n"
     "2. host 는 사용자가 호스트를 말했을 때만 넣는다. 비우면 ip 가 속한 호스트, 그다음 서버의 기본 호스트에 만든다. "
     "기본 호스트가 없어 오류가 오면 그 '사용 가능' 목록으로 한 번만 묻는다.\n"
     "3. 여러 대를 만들려면 반복 호출한다. 값을 지어내지 않는다.\n"
