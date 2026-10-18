@@ -125,6 +125,7 @@ VAGRANT_IP_RANGE="10.0.0.60-10.0.0.89" # VM 에 줄 고정 IP 대역 (쉼표로 
 VAGRANT_BRIDGE="eno1"                  # 브리지할 호스트 NIC (비우면 vagrant up 때 물어보므로 꼭 지정)
 # VAGRANT_TIMEOUT=1800                 # vagrant 명령 최대 대기(초)
 # VAGRANT_MAX_PARALLEL=2               # 동시에 실행할 vagrant 명령 수
+# VAGRANT_BOOT_TIMEOUT=600             # VM 부팅(SSH 접속) 대기 시간(초). 부팅 시간 초과가 나면 늘림
 # VAGRANT_SKIP_ANSIBLE=false           # true 면 Ansible 환경 구성을 건너뜀
 # VAGRANT_VM_PASSWORD_AUTH=true        # VM SSH 비밀번호 로그인 (아래 'VM 이미지와 접속')
 # VAGRANT_VM_PASSWORD="vagrant"        # vagrant 계정 비밀번호
@@ -185,7 +186,9 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
 
 #### 프로젝트 폴더
 
-VM 은 `{workdir}/{project}/vg-<이름>` 에 만들어집니다. `project` 는 `vg_create_vm` 에서 사용자가 지정하고(영문/숫자/`._-`, 한 단계), 비우면 호스트의 `default_project` → `VAGRANT_DEFAULT_PROJECT` 순으로 씁니다. 둘 다 없으면 `{workdir}/vg-<이름>` 입니다. 생성 때 정해진 project 는 DB 에 기록되어 변경과 삭제가 같은 경로를 쓰므로, 이후에 기본값을 바꿔도 기존 VM 의 경로는 그대로입니다.
+VM 은 `{workdir}/{project}/{dir_name}` 에 만들어집니다. `project` 는 `vg_create_vm` 에서 사용자가 지정하고(영문/숫자/`._-`, 한 단계), 비우면 호스트의 `default_project` → `VAGRANT_DEFAULT_PROJECT` 순으로 씁니다. 둘 다 없으면 `{workdir}/{dir_name}` 입니다. 생성 때 정해진 project 는 DB 에 기록되어 변경과 삭제가 같은 경로를 쓰므로, 이후에 기본값을 바꿔도 기존 VM 의 경로는 그대로입니다.
+
+`dir_name`(VM 폴더 이름)도 `vg_create_vm` 에서 지정할 수 있습니다(영문/숫자/`._-`, 한 단계). 비우면 `vg-<이름>` 입니다. VirtualBox VM 이름은 지정한 폴더 이름과 상관없이 항상 `vg-<이름>` 입니다. 삭제는 VM 폴더를 통째로 지우므로, 이 서버의 다른 VM 이 쓰는 폴더나 **호스트에 이미 있는 폴더**는 지정할 수 없습니다.
 
 #### 응답에서 내부 정보 가리기
 

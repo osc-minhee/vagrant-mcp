@@ -1,4 +1,26 @@
 ---
+# ansible-core 2.17 부터 대상에 Python 3.8 이상이 필요하다. Rocky/RHEL 8 의 기본 Python(platform-python)은 3.6 이라
+# fact 수집부터 실패하므로, Python 없이 실행되는 raw 로 python3.11 을 먼저 설치하고 그것을 쓰게 한다.
+- name: "Python 준비 (Rocky/RHEL 8)"
+  hosts: all
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: "RHEL 8 계열이면 python3.11 설치"
+      raw: |
+        if grep -qE 'release 8(\.|$| )' /etc/redhat-release 2>/dev/null; then
+          echo "el8"
+          command -v python3.11 >/dev/null 2>&1 || { dnf -y -q install python3.11 >/dev/null && echo "installed"; }
+        fi
+      register: py_prepare
+      changed_when: "'installed' in py_prepare.stdout"
+
+    # set_fact 는 MCP 서버(제어 노드)에서 실행되므로 대상의 Python 이 없어도 된다. 다음 play 에도 이어진다.
+    - name: "RHEL 8 계열은 python3.11 사용"
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.11
+      when: "'el8' in py_prepare.stdout"
+
 - name: "샌드박스 서버 기초 환경 설정"
   hosts: all
   become: yes
@@ -199,12 +221,21 @@
         - vm_gateway | default('', true) | length > 0
         - ansible_facts['os_family'] == "Debian"
 
-    - name: "기본 경로 저장 (RedHat: NetworkManager)"
+    # NetworkManager 가 관리하는 인터페이스면 그 연결에, 아니면(Rocky 8 에서 Vagrant 가 NM_CONTROLLED=no 로 만든 경우)
+    # network-scripts 의 route-<인터페이스> 파일에 저장한다.
+    - name: "기본 경로 저장 (RedHat: NetworkManager 또는 route 파일)"
       shell: |
-        con="$(nmcli -g GENERAL.CONNECTION device show {{ bridge_iface.stdout | trim }})"
-        [ -n "$con" ] || { echo "{{ bridge_iface.stdout | trim }} 의 NetworkManager 연결을 찾지 못했습니다." >&2; exit 1; }
-        nmcli -g ipv4.routes connection show "$con" | grep -q "{{ vm_gateway }}" && exit 0
-        nmcli connection modify "$con" +ipv4.routes "0.0.0.0/0 {{ vm_gateway }} 10"
+        iface="{{ bridge_iface.stdout | trim }}"
+        con="$(nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null)"
+        if [ -n "$con" ]; then
+          nmcli -g ipv4.routes connection show "$con" | grep -q "{{ vm_gateway }}" && exit 0
+          nmcli connection modify "$con" +ipv4.routes "0.0.0.0/0 {{ vm_gateway }} 10"
+        else
+          f="/etc/sysconfig/network-scripts/route-$iface"
+          grep -qs "default via {{ vm_gateway }}" "$f" && exit 0
+          mkdir -p /etc/sysconfig/network-scripts
+          echo "default via {{ vm_gateway }} dev $iface metric 10" >> "$f"
+        fi
         echo changed
       register: nm_route_result
       changed_when: "'changed' in nm_route_result.stdout"

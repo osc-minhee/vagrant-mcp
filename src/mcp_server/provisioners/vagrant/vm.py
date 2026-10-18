@@ -113,6 +113,7 @@ vagrant_executor = VagrantExecutor(
     ssh_pubkey_paths=[SSH_DIR / "agent_key.pub", SSH_DIR / "admin_key.pub"],
     timeout=get_env_int("VAGRANT_TIMEOUT", 1800),
     max_parallel=get_env_int("VAGRANT_MAX_PARALLEL", 2),
+    boot_timeout=get_env_int("VAGRANT_BOOT_TIMEOUT", 600),
 )
 
 ansible_executor = AnsibleExecutor(
@@ -328,6 +329,37 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 f"호스트 '{host.name}' 의 CPU 는 {info['cpu_total']}개라 vCPU {cpu}개를 줄 수 없습니다. {info['cpu_total']}개 이하로 지정하세요."
             )
 
+    async def _check_dir_free(
+        self, host: VagrantHost, project: Optional[str], dir_name: str, resource_id: str, check_host: bool
+    ) -> None:
+        """
+        VM 폴더를 쓸 수 있는지 확인한다. 삭제는 VM 폴더를 통째로 지우므로 남의 폴더를 쓰면 안 된다.
+        1) 같은 호스트, 같은 project 에서 이 서버의 다른 VM 이 쓰는 폴더면 거절한다.
+        2) check_host 면(dir_name 을 지정한 경우) 호스트에 이미 있는 폴더도 거절한다.
+           기본 폴더(vg-<이름>)는 예전처럼 확인하지 않는다 (이전에 이 서버가 만든 폴더가 남아 있을 수 있다).
+        """
+        where = f"{project}/{dir_name}" if project else dir_name
+        for item in await super().list_all():
+            if item["resource_id"] == resource_id:
+                continue  # 지금 만드는 리소스 자신 (PENDING 으로 먼저 기록된다)
+            other = _vars_of(item)
+            if (self._host_name(other) or "").lower() != host.name.lower():
+                continue
+            if (other.get("project") or None) == project and (other.get("dir_name") or item["resource_id"]) == dir_name:
+                raise ValueError(f"폴더 '{where}' 는 이 서버의 VM '{item['name']}' 이 쓰고 있습니다. 다른 dir_name 을 지정하세요.")
+        if not check_host:
+            return
+        try:
+            exists = await self.infra_executor.vm_dir_exists(host, "", {"project": project, "dir_name": dir_name})
+        except Exception as e:
+            raise RuntimeError(redact_text(
+                f"호스트 '{host.name}' 에서 폴더가 있는지 확인하지 못해 생성하지 않았습니다: {type(e).__name__}: {e}"
+            )) from e
+        if exists:
+            raise ValueError(
+                f"호스트 '{host.name}' 에 폴더 '{where}' 가 이미 있습니다. 기존 폴더를 덮어쓰거나 삭제 때 지우지 않도록 다른 dir_name 을 지정하세요."
+            )
+
     async def prepare_data(self, params: VagrantVMCreateInput) -> ProvisioningManifest:
         # 끝자리(75)로 준 ip 는 여기서 전체 IP 로 바뀐다.
         host, ip = self._resolve_target(params.host, params.ip)
@@ -335,13 +367,18 @@ class VagrantVMProvisioner(ResourceProvisioner):
         # 요청의 cpu 가 있으면 flavor 의 vCPU 대신 쓴다. 메모리는 flavor 로만 정한다.
         cpu = params.cpu or spec["cpu"]
         await self._check_capacity(host, params.flavor, cpu)
+        # 요청의 project, 없으면 호스트의 기본 프로젝트. 둘 다 없으면 None (workdir 바로 아래)
+        project = params.project or host.default_project
+        resource_id = self.resource_id(params.name)
+        await self._check_dir_free(
+            host, project, params.dir_name or resource_id, resource_id, check_host=bool(params.dir_name)
+        )
         vars = params.model_dump(mode="json")
         vars.update(spec)
         vars["cpu"] = cpu
         vars.update({
             "host": host.name,
-            # 요청의 project, 없으면 호스트의 기본 프로젝트. 둘 다 없으면 None (workdir 바로 아래)
-            "project": params.project or host.default_project,
+            "project": project,
             # 요청의 ip(대역 안이고 비어 있어야 함), 없으면 대역에서 자동 할당
             "ip": await self._allocate_ip(host, ip),
             **IMAGE_BOXES[params.image],
@@ -397,6 +434,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
         # host 기록이 없는 기존 리소스는 IP 가 속한 호스트. 정할 수 없으면 None.
         item["host"] = self._host_name(vars)
         item["project"] = vars.get("project") or None
+        # VM 폴더 이름. 지정하지 않았으면 resource_id(vg-<이름>)
+        item["dir_name"] = vars.get("dir_name") or item.get("resource_id")
         item["flavor"] = vars.get("flavor") or "N/A"
         # cpu 를 따로 지정했으면 flavor 와 다를 수 있어 실제 값을 함께 보여 준다.
         item["cpu"] = vars.get("cpu")
@@ -487,16 +526,18 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 f"호스트 '{target.name}' 의 VM 목록을 조회하지 못했습니다: {type(e).__name__}: {e}"
             )) from e
 
-        # 이 서버가 만든 VM 은 VirtualBox 이름과 폴더 이름이 모두 resource_id(vg-<이름>) 이다.
-        managed = {
-            item["resource_id"]: item
-            for item in await super().list_all()
-            if (self._host_name(_vars_of(item)) or "").lower() == target.name.lower()
-        }
+        # 이 서버가 만든 VM 은 VirtualBox 이름이 resource_id(vg-<이름>) 이고, 폴더 이름은 dir_name(없으면 resource_id) 이다.
+        managed: Dict[str, Dict[str, Any]] = {}
+        managed_dirs: Dict[str, Dict[str, Any]] = {}
+        for item in await super().list_all():
+            item_vars = _vars_of(item)
+            if (self._host_name(item_vars) or "").lower() == target.name.lower():
+                managed[item["resource_id"]] = item
+                managed_dirs[item_vars.get("dir_name") or item["resource_id"]] = item
         vms = inventory["vms"]
         for vm in vms:
             folder = (vm["project_dir"] or "").rsplit("/", 1)[-1]
-            own = managed.get(vm["name"]) or managed.get(folder)
+            own = managed.get(vm["name"]) or managed_dirs.get(folder)
             vm["managed"] = own is not None
             if own:
                 # vg_* 도구에서 쓰는 이름과 이 서버의 기록 상태

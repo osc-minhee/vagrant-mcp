@@ -175,6 +175,7 @@ class VagrantExecutor(InfraExecutor):
         ssh_pubkey_paths: List[Path],
         timeout: int = 1800,
         max_parallel: int = 2,
+        boot_timeout: int = 600,
     ):
         if not hosts:
             raise ValueError("Vagrant 호스트가 하나 이상 필요합니다.")
@@ -184,6 +185,8 @@ class VagrantExecutor(InfraExecutor):
         self.template_path = template_path
         self.ssh_pubkey_paths = ssh_pubkey_paths
         self.timeout = timeout
+        # vagrant up 이 VM 부팅(SSH 접속)을 기다리는 시간 (Vagrantfile 의 config.vm.boot_timeout, Vagrant 기본 300초)
+        self.boot_timeout = boot_timeout
         # 동시에 너무 많은 VM 을 올리면 box 다운로드/VirtualBox 가 충돌하므로 호스트마다 동시 실행 수를 제한한다.
         self.semaphores = {key: asyncio.Semaphore(max_parallel) for key in hosts}
         self.logger = logging.getLogger(__name__)
@@ -226,11 +229,18 @@ class VagrantExecutor(InfraExecutor):
         raise RuntimeError(f"호스트 기록이 없고 IP({ip})가 여러 호스트의 ip_ranges 에 속해 호스트를 정할 수 없습니다: {', '.join(h.name for h in matches)}")
 
     def _vm_dir(self, host: VagrantHost, resource_id: str, vars: Dict[str, Any]) -> str:
-        # project 는 생성 때 vars 에 기록된다. 기록이 없는 기존 리소스는 workdir 바로 아래에 있다.
+        # project 와 dir_name 은 생성 때 vars 에 기록된다. 기록이 없는 기존 리소스는 workdir 바로 아래의 resource_id 폴더에 있다.
         # (호스트의 default_project 로 대신하면 안 된다. 나중에 바뀐 설정 때문에 엉뚱한 경로를 지울 수 있다.)
         project = vars.get("project")
         base = f"{host.workdir}/{project}" if project else host.workdir
-        return f"{base}/{resource_id}"
+        return f"{base}/{vars.get('dir_name') or resource_id}"
+
+    async def vm_dir_exists(self, host: VagrantHost, resource_id: str, vars: Dict[str, Any]) -> bool:
+        """
+        VM 폴더가 호스트에 이미 있는지. (읽기 전용) 남의 폴더를 덮어쓰거나 삭제 때 지우지 않도록 생성 전에 확인한다.
+        """
+        result = await host.runner.run(f"[ -e {sh_path(self._vm_dir(host, resource_id, vars))} ] && echo 1 || echo 0", timeout=30)
+        return result.stdout.strip() == "1"
 
     def _ssh_pubkeys(self) -> List[str]:
         keys = []
@@ -247,7 +257,9 @@ class VagrantExecutor(InfraExecutor):
 
     def render(self, resource_id: str, vars: Dict[str, Any]) -> str:
         template = self.jinja.get_template(self.template_path.name)
-        return template.render(resource_id=resource_id, ssh_pubkeys=self._ssh_pubkeys(), **vars)
+        return template.render(
+            resource_id=resource_id, ssh_pubkeys=self._ssh_pubkeys(), boot_timeout=self.boot_timeout, **vars
+        )
 
     async def _run(self, host: VagrantHost, resource_id: str, command: str, script: str) -> ExecResult:
         async with self.semaphores[host.name.lower()]:
