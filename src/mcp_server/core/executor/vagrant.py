@@ -175,6 +175,7 @@ class VagrantExecutor(InfraExecutor):
         ssh_pubkey_paths: List[Path],
         timeout: int = 1800,
         max_parallel: int = 2,
+        boot_timeout: int = 600,
     ):
         if not hosts:
             raise ValueError("Vagrant 호스트가 하나 이상 필요합니다.")
@@ -184,6 +185,8 @@ class VagrantExecutor(InfraExecutor):
         self.template_path = template_path
         self.ssh_pubkey_paths = ssh_pubkey_paths
         self.timeout = timeout
+        # vagrant up 이 VM 부팅(SSH 접속)을 기다리는 시간 (Vagrantfile 의 config.vm.boot_timeout, Vagrant 기본 300초)
+        self.boot_timeout = boot_timeout
         # 동시에 너무 많은 VM 을 올리면 box 다운로드/VirtualBox 가 충돌하므로 호스트마다 동시 실행 수를 제한한다.
         self.semaphores = {key: asyncio.Semaphore(max_parallel) for key in hosts}
         self.logger = logging.getLogger(__name__)
@@ -247,7 +250,9 @@ class VagrantExecutor(InfraExecutor):
 
     def render(self, resource_id: str, vars: Dict[str, Any]) -> str:
         template = self.jinja.get_template(self.template_path.name)
-        return template.render(resource_id=resource_id, ssh_pubkeys=self._ssh_pubkeys(), **vars)
+        return template.render(
+            resource_id=resource_id, ssh_pubkeys=self._ssh_pubkeys(), boot_timeout=self.boot_timeout, **vars
+        )
 
     async def _run(self, host: VagrantHost, resource_id: str, command: str, script: str) -> ExecResult:
         async with self.semaphores[host.name.lower()]:

@@ -113,6 +113,7 @@ vagrant_executor = VagrantExecutor(
     ssh_pubkey_paths=[SSH_DIR / "agent_key.pub", SSH_DIR / "admin_key.pub"],
     timeout=get_env_int("VAGRANT_TIMEOUT", 1800),
     max_parallel=get_env_int("VAGRANT_MAX_PARALLEL", 2),
+    boot_timeout=get_env_int("VAGRANT_BOOT_TIMEOUT", 600),
 )
 
 ansible_executor = AnsibleExecutor(

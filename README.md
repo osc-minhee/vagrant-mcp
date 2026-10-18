@@ -125,6 +125,7 @@ VAGRANT_IP_RANGE="10.0.0.60-10.0.0.89" # VM 에 줄 고정 IP 대역 (쉼표로 
 VAGRANT_BRIDGE="eno1"                  # 브리지할 호스트 NIC (비우면 vagrant up 때 물어보므로 꼭 지정)
 # VAGRANT_TIMEOUT=1800                 # vagrant 명령 최대 대기(초)
 # VAGRANT_MAX_PARALLEL=2               # 동시에 실행할 vagrant 명령 수
+# VAGRANT_BOOT_TIMEOUT=600             # VM 부팅(SSH 접속) 대기 시간(초). 부팅 시간 초과가 나면 늘림
 # VAGRANT_SKIP_ANSIBLE=false           # true 면 Ansible 환경 구성을 건너뜀
 # VAGRANT_VM_PASSWORD_AUTH=true        # VM SSH 비밀번호 로그인 (아래 'VM 이미지와 접속')
 # VAGRANT_VM_PASSWORD="vagrant"        # vagrant 계정 비밀번호
