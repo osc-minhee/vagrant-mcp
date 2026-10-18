@@ -95,6 +95,18 @@ if os.getenv("VAGRANT_BOX") or os.getenv("VAGRANT_BOX_VERSION"):
 HOSTS = load_hosts()
 SSH_DIR = SECRETS_DIR / ".ssh"
 
+# host 를 비웠을 때 쓸 호스트 (VAGRANT_DEFAULT_HOST). 없으면 호스트가 1대일 때만 그 호스트를 쓴다.
+_default_host_name = os.getenv("VAGRANT_DEFAULT_HOST", "").strip()
+if _default_host_name and _default_host_name.lower() not in HOSTS:
+    raise ValueError(
+        f"VAGRANT_DEFAULT_HOST '{_default_host_name}' 가 호스트 목록에 없습니다. (사용 가능: {', '.join(h.name for h in HOSTS.values())})"
+    )
+DEFAULT_HOST: Optional[VagrantHost] = (
+    HOSTS[_default_host_name.lower()] if _default_host_name
+    else next(iter(HOSTS.values())) if len(HOSTS) == 1
+    else None
+)
+
 vagrant_executor = VagrantExecutor(
     hosts=HOSTS,
     template_path=APP_DIR / "vagrant" / "templates" / "Vagrantfile.j2",
@@ -131,16 +143,30 @@ class VagrantVMProvisioner(ResourceProvisioner):
     def resource_type(cls):
         return "vm"
 
-    def _resolve_host(self, name: Optional[str]) -> VagrantHost:
+    def _resolve_host(self, name: Optional[str], ip: Optional[str] = None) -> VagrantHost:
+        """
+        작업할 호스트. 순서: 요청한 host -> ip 가 속한 호스트(ip_ranges) -> 기본 호스트(VAGRANT_DEFAULT_HOST, 호스트가 1대면 그 호스트).
+        host 와 ip 를 함께 주면 host 를 따르고, ip 가 그 호스트 대역 밖이면 IP 할당 단계에서 거절한다.
+        """
         names = ", ".join(h.name for h in HOSTS.values())
         if name:
             host = HOSTS.get(name.strip().lower())
             if not host:
                 raise ValueError(f"알 수 없는 호스트: {name} (사용 가능: {names})")
             return host
-        if len(HOSTS) == 1:
-            return next(iter(HOSTS.values()))
-        raise ValueError(f"host 를 지정해야 합니다. 사용자에게 어느 호스트에 만들지 물어보세요. (사용 가능: {names})")
+        if ip:
+            matches = [h for h in HOSTS.values() if ip in h.ip_pool]
+            if len(matches) == 1:
+                return matches[0]
+            if not matches:
+                ranges = "; ".join(f"{h.name}: {_pool_ranges(h.ip_pool) or '대역 없음'}" for h in HOSTS.values())
+                raise ValueError(f"IP {ip} 는 어느 호스트의 IP 대역에도 속하지 않습니다. ({ranges})")
+            raise ValueError(
+                f"IP {ip} 가 여러 호스트의 IP 대역({', '.join(h.name for h in matches)})에 속해 호스트를 정할 수 없습니다. host 를 지정하세요."
+            )
+        if DEFAULT_HOST:
+            return DEFAULT_HOST
+        raise ValueError(f"host 를 지정해야 합니다. 사용자에게 어느 호스트인지 물어보세요. (사용 가능: {names})")
 
     async def _host_used_ips(self, host: VagrantHost) -> Dict[str, str]:
         """
@@ -197,10 +223,11 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
         raise RuntimeError(f"호스트 '{host.name}' 의 IP 대역 안에 사용할 수 있는 IP 가 없습니다. (전체 {len(host.ip_pool)}개)")
 
-    async def _check_capacity(self, host: VagrantHost, flavor: Flavor) -> None:
+    async def _check_capacity(self, host: VagrantHost, flavor: Flavor, cpu: int) -> None:
         """
         호스트에 VM 을 올릴 여유가 있는지 확인하고, 없으면 RuntimeError 로 거절한다.
-        기준은 일부러 느슨하다: 가용 메모리(MemAvailable) >= 요청 사양 + 예비, 디스크 여유 >= 최소 여유. CPU 는 보지 않는다.
+        기준은 일부러 느슨하다: 가용 메모리(MemAvailable) >= 요청 사양 + 예비, 디스크 여유 >= 최소 여유,
+        vCPU <= 호스트 전체 CPU 수. (CPU 부하나 다른 VM 의 vCPU 합계는 보지 않는다)
         오버커밋(실행 중 VM 할당 합계)은 따지지 않고, 이 서버가 방금 시작시킨 VM 은 아직 반영되지 않을 수 있다.
         VAGRANT_RESOURCE_CHECK=false 면 확인하지 않는다.
         """
@@ -233,12 +260,21 @@ class VagrantVMProvisioner(ResourceProvisioner):
             raise RuntimeError(
                 f"호스트 '{host.name}' 의 디스크 여유가 부족합니다: {info['disk_available_mb']}MiB (최소 {min_disk}MiB 필요)."
             )
+        if cpu > info["cpu_total"]:
+            raise RuntimeError(
+                f"호스트 '{host.name}' 의 CPU 는 {info['cpu_total']}개라 vCPU {cpu}개를 줄 수 없습니다. {info['cpu_total']}개 이하로 지정하세요."
+            )
 
     async def prepare_data(self, params: VagrantVMCreateInput) -> ProvisioningManifest:
-        host = self._resolve_host(params.host)
-        await self._check_capacity(host, params.flavor)
+        ip = str(params.ip) if params.ip else None
+        host = self._resolve_host(params.host, ip)
+        spec = FLAVOR_SPECS[params.flavor]
+        # 요청의 cpu 가 있으면 flavor 의 vCPU 대신 쓴다. 메모리는 flavor 로만 정한다.
+        cpu = params.cpu or spec["cpu"]
+        await self._check_capacity(host, params.flavor, cpu)
         vars = params.model_dump(mode="json")
-        vars.update(FLAVOR_SPECS[params.flavor])
+        vars.update(spec)
+        vars["cpu"] = cpu
         vars.update({
             "host": host.name,
             # 요청의 project, 없으면 호스트의 기본 프로젝트. 둘 다 없으면 None (workdir 바로 아래)
@@ -252,8 +288,16 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
     async def prepare_update(self, params: Any, current: ProvisioningManifest) -> ProvisioningManifest:
         manifest = await super().prepare_update(params, current)
-        # flavor 가 바뀌면 cpu/memory 도 함께 바꾼다. IP 등 할당된 값은 그대로 둔다.
-        manifest.vars.update(FLAVOR_SPECS[Flavor(manifest.vars["flavor"])])
+        spec = FLAVOR_SPECS[Flavor(manifest.vars["flavor"])]
+        if params.flavor is not None:
+            # flavor 를 바꾸면 memory 는 flavor 값, cpu 는 요청의 cpu 가 있으면 그것, 없으면 flavor 값.
+            manifest.vars["memory"] = spec["memory"]
+            manifest.vars["cpu"] = params.cpu or spec["cpu"]
+        else:
+            # cpu 만 바꾸면 위 super() 에서 이미 반영됐다. 값이 없는 기존 리소스는 flavor 값으로 채운다.
+            manifest.vars.setdefault("cpu", spec["cpu"])
+            manifest.vars.setdefault("memory", spec["memory"])
+        # IP 등 할당된 값은 그대로 둔다.
         # host 기록이 없는 기존 리소스는 IP 로 찾은 호스트를 기록해 둔다. (찾지 못하면 변경하지 않고 오류)
         manifest.vars["host"] = self.infra_executor.host_of(manifest.vars).name
         return manifest
@@ -284,6 +328,9 @@ class VagrantVMProvisioner(ResourceProvisioner):
         item["host"] = self._host_name(vars)
         item["project"] = vars.get("project") or None
         item["flavor"] = vars.get("flavor") or "N/A"
+        # cpu 를 따로 지정했으면 flavor 와 다를 수 있어 실제 값을 함께 보여 준다.
+        item["cpu"] = vars.get("cpu")
+        item["memory_mb"] = vars.get("memory")
         item["purpose"] = vars.get("purpose") or "N/A"
         item["ip"] = vars.get("ip") or "N/A"
         # image 기록이 없는 기존 리소스는 box 만 보여 준다.
@@ -356,8 +403,6 @@ class VagrantVMProvisioner(ResourceProvisioner):
         scan_root 아래 Vagrantfile, 실행 중인 VirtualBox 프로세스, SSH 계정의 VirtualBox 목록을 합친다.
         managed=True 면 이 서버가 만든 VM 이다.
         """
-        if not host and len(HOSTS) > 1:
-            raise ValueError(f"host 를 지정해야 합니다. (사용 가능: {', '.join(h.name for h in HOSTS.values())})")
         target = self._resolve_host(host)
 
         try:

@@ -122,6 +122,27 @@
       when: ssh_password_auth | bool
       notify: restart sshd
 
+    # 설정 파일만 보고 끝내지 않고, 재시작한 sshd 가 실제로 비밀번호 로그인을 허용하는지 확인한다.
+    # 허용하지 않으면 여기서 실패해 VM 이 ERROR 가 되고 last_error 로 원인이 보인다.
+    - name: "변경한 SSH 설정 바로 적용"
+      meta: flush_handlers
+
+    - name: "sshd 실제 적용 설정 조회"
+      command: sshd -T
+      register: sshd_effective
+      changed_when: false
+      when: ssh_password_auth | bool
+
+    - name: "SSH 비밀번호 로그인 적용 확인"
+      assert:
+        that: "'passwordauthentication yes' in sshd_effective.stdout_lines"
+        fail_msg: >-
+          sshd 가 비밀번호 로그인을 허용하지 않습니다
+          ({{ sshd_effective.stdout_lines | select('match', '^(passwordauthentication|kbdinteractiveauthentication|usepam) ') | list | join(', ') }}).
+          /etc/ssh/sshd_config 와 /etc/ssh/sshd_config.d/ 의 PasswordAuthentication 설정을 확인하세요.
+        quiet: true
+      when: ssh_password_auth | bool
+
     - name: "기본 패키지 설치 결과 출력"
       debug:
         msg: "설치된 패키지: {{ common_packages + (common_packages_debian if ansible_os_family == 'Debian' else common_packages_redhat) }}"

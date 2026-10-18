@@ -16,7 +16,9 @@ vg_vm = ProvisionerRegistry.get_provisioner(CloudProvider.VAGRANT, "vm")
     "규칙:\n"
     "1. 필수는 name(소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, image=ubuntu-22.04, project=호스트 기본 프로젝트.\n"
     "   image 는 ubuntu-22.04, rocky-8, rocky-9 중 하나다 (사용자가 Rocky/CentOS 계열을 원하면 rocky-9).\n"
-    "2. host 는 호스트가 1대면 비운다. 2대 이상이고 사용자가 말하지 않았으면 비워서 호출하고, 오류의 '사용 가능' 목록으로 한 번만 묻는다.\n"
+    "   cpu 는 사용자가 vCPU 개수를 말했을 때만 넣는다 (flavor 의 vCPU 대신 쓰이고, 메모리는 flavor 로 정해진다).\n"
+    "2. host 는 사용자가 호스트를 말했을 때만 넣는다. 비우면 ip 가 속한 호스트, 그다음 서버의 기본 호스트에 만든다. "
+    "기본 호스트가 없어 오류가 오면 그 '사용 가능' 목록으로 한 번만 묻는다.\n"
     "3. 여러 대를 만들려면 반복 호출한다. 값을 지어내지 않는다.\n"
     "4. 호스트 자원이 부족하면 이유와 가능한 사양이 오류로 온다. 그대로 전하고 더 작은 사양이나 다른 호스트를 제안한다.\n"
     "5. ip 는 사용자가 특정 IP 를 말했을 때만 넣는다. 호스트 IP 대역 안의 IP 만 쓸 수 있고, 대역 밖이거나 사용 중이면 이유(와 대역)가 오류로 온다. "
@@ -26,10 +28,10 @@ async def vg_create_vm(params: VagrantVMCreateInput):
     return await vg_vm.create(params)
 
 @router.post("/vg_update_vm", operation_id="vg_update_vm", description=(
-    "기존에 생성된 Vagrant VM의 설정(사양, 용도)을 변경하는 도구이다. 실행 중인 VM은 재시작(vagrant reload)된다.\n"
+    "기존에 생성된 Vagrant VM의 설정(사양, vCPU, 용도)을 변경하는 도구이다. 실행 중인 VM은 재시작(vagrant reload)된다.\n"
     "이 도구는 사용 시 다음 규칙을 준수해야 한다.\n"
     "1. 반드시 업데이트할 대상 VM의 정확한 name 파라미터를 포함해야 한다.\n"
-    "2. flavor(사양)나 purpose(용도) 중 변경하려는 파라미터만 포함하여 전달한다. 빠진 값은 기존 값을 유지한다.\n"
+    "2. flavor(사양), cpu(vCPU 수), purpose(용도) 중 변경하려는 파라미터만 포함하여 전달한다. 빠진 값은 기존 값을 유지한다.\n"
     "3. VM이 재시작되므로 호출 전에 사용자에게 확인을 받는다."
 ))
 async def vg_update_vm(params: VagrantVMUpdateInput):
@@ -59,10 +61,11 @@ async def vg_list_hosts():
     "state: running, poweroff/saved/aborted(이 서버 계정의 VM 만 구분됨), not_running(꺼져 있음. 다른 계정 VM 이라 세부 상태는 모름), "
     "not_created(Vagrantfile 만 있고 vagrant up 한 적 없음), unknown(.vagrant 기록을 읽을 권한이 없음).\n"
     "managed=true 는 이 서버가 만든 VM 이고 managed_name 이 vg_* 도구에서 쓰는 이름이다. managed=false 인 VM 은 이 서버로 변경/삭제할 수 없다.\n"
-    "호스트가 1대면 host 를 비우고, 2대 이상이면 지정한다. notes 가 있으면 조회하지 못한 부분이니 함께 전한다."
+    "host 는 사용자가 호스트를 말했을 때만 넣고, 비우면 서버의 기본 호스트를 조회한다. 모든 호스트를 보려면 호스트마다 호출한다. "
+    "notes 가 있으면 조회하지 못한 부분이니 함께 전한다."
 ))
 async def vg_list_host_vms(
-    host: Optional[str] = Query(None, description="조회할 호스트 이름. 호스트가 1대면 비운다."),
+    host: Optional[str] = Query(None, description="조회할 호스트 이름. 사용자가 말하지 않았으면 비운다(기본 호스트)."),
 ):
     return await vg_vm.list_host_vms(host)
 

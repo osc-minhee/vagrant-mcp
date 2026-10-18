@@ -168,7 +168,7 @@ VAGRANT_HOSTS='[{"name":"host-a","address":"192.168.0.10","user":"oscka","workdi
 | `ssh_key`, `ssh_password` | 호스트별 접속 인증 (없으면 공통 설정) |
 
 - 호스트 기록이 없는 기존 VM 은 IP 가 속한 `ip_ranges` 의 호스트에 있는 것으로 봅니다. (호스트가 1대면 그 호스트) 어느 대역에도 속하지 않거나 여러 대역에 속하면 변경/삭제하지 않고 오류를 남깁니다. 변경할 때 찾은 호스트를 기록합니다.
-- 호스트가 1대면 `vg_create_vm` 에서 `host` 를 비워도 되고, 2대 이상이면 반드시 지정해야 합니다. 지정하지 않으면 사용 가능한 호스트 목록이 담긴 오류가 반환됩니다.
+- `vg_create_vm` 에서 `host` 를 비우면 `ip` 를 줬을 때는 그 IP 가 속한 `ip_ranges` 의 호스트, 아니면 `VAGRANT_DEFAULT_HOST` 에 만듭니다. 호스트가 1대면 `VAGRANT_DEFAULT_HOST` 가 없어도 그 호스트를 씁니다. 2대 이상인데 `VAGRANT_DEFAULT_HOST` 가 없으면 사용 가능한 호스트 목록이 담긴 오류가 반환됩니다. `vg_list_host_vms` 도 `host` 를 비우면 기본 호스트를 조회합니다.
 - VM 이름은 호스트와 상관없이 전체에서 유일해야 합니다. 변경/삭제는 VM 이 생성된 호스트에서 실행됩니다.
 - IP 는 선택한 호스트의 `ip_ranges` 안에서 아래를 모두 피한 첫 IP 를 고릅니다. 사용 중 IP 확인에 실패하면 생성하지 않습니다.
   1. 이 서버 DB 에 기록된 IP
@@ -260,8 +260,8 @@ cd src && SECRETS_DIR=../secrets python -m mcp_server.main
 | Tool | 설명 |
 | :--- | :--- |
 | `vg_list_hosts` | 호스트 목록과 자원 현황(CPU, 메모리, 디스크, VirtualBox 실행 현황), 이 서버가 만든 VM 수, 남은 IP 수(`ip_available`), 대역 안을 다른 VM 이 쓰는 수(`ip_used_by_others`) 조회. 접속 실패 호스트는 `reachable=false` |
-| `vg_create_vm` | VM 1대 생성 (name, flavor, purpose, image, host, project, ip). ip 를 비우면 호스트 IP 대역에서 자동 할당, 지정하면 대역 안이고 비어 있을 때만 사용. 호스트가 2대 이상이면 host 지정, project 를 비우면 호스트의 기본 프로젝트. 자원이 부족하면 거절. 백그라운드로 진행 |
-| `vg_update_vm` | 사양/용도 변경. 실행 중이면 `vagrant reload` 로 재시작 |
+| `vg_create_vm` | VM 1대 생성 (name, flavor, cpu, purpose, image, host, project, ip). cpu 를 주면 flavor 의 vCPU 대신 사용(호스트 CPU 수 이하). ip 를 비우면 호스트 IP 대역에서 자동 할당, 지정하면 대역 안이고 비어 있을 때만 사용. host 를 비우면 ip 의 호스트 → `VAGRANT_DEFAULT_HOST`, project 를 비우면 호스트의 기본 프로젝트. 자원이 부족하면 거절. 백그라운드로 진행 |
+| `vg_update_vm` | 사양(flavor)/vCPU(cpu)/용도 변경. 실행 중이면 `vagrant reload` 로 재시작 |
 | `vg_destroy_vm` | `vagrant destroy -f` 후 VM 폴더 삭제 |
 | `vg_list_vm` | VM 목록, 호스트, 프로젝트, 상태, IP, 사양, 오류 원인 조회 (DB 기록 기준). `host`, `state` 로 거르기 |
 | `vg_get_vm` | VM 1대의 기록 + 호스트 VirtualBox 의 실제 상태(`actual`). 기록은 RUNNING 인데 실제로 꺼져 있거나 없거나 사양이 다르면 `mismatch` |
