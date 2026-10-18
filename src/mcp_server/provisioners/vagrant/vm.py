@@ -16,7 +16,7 @@ from mcp_server.core.registry import ProvisionerRegistry
 from mcp_server.database import get_resource, get_used_values
 from mcp_server.schemas.base import ProvisioningManifest
 from mcp_server.schemas.vagrant import VagrantVMCreateInput
-from mcp_server.utils import get_env_int
+from mcp_server.utils import get_env_int, now_local, utc_to_local
 
 FLAVOR_SPECS = {
     Flavor.SMALL: {"cpu": 1, "memory": 2048},
@@ -406,6 +406,10 @@ class VagrantVMProvisioner(ResourceProvisioner):
         # image 기록이 없는 기존 리소스는 box 만 보여 준다.
         item["image"] = vars.get("image") or "N/A"
         item["box"] = vars.get("box") or "N/A"
+        # DB 시각은 UTC 라 서버 시간대(+09:00 등)로 바꿔 보여 준다.
+        for key in ("created_at", "updated_at"):
+            if key in item:
+                item[key] = utc_to_local(item[key])
         if metadata.get("last_warning"):
             item["warning"] = redact_text(metadata["last_warning"])[-300:]
         if metadata.get("last_error"):
@@ -437,6 +441,7 @@ class VagrantVMProvisioner(ResourceProvisioner):
         vars = _vars_of(resource)
         item = self._format(resource)
         item.pop("provider", None)
+        item["checked_at"] = now_local()
 
         try:
             host = self.infra_executor.host_of(vars)

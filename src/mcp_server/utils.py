@@ -2,9 +2,26 @@
 import ipaddress
 import logging
 import os
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+def now_local() -> str:
+    """
+    지금 시각 (서버 시간대, 예: 2026-10-18T15:58:58+09:00). 조회 응답에 넣어 언제 조회한 결과인지 알 수 있게 한다.
+    """
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+def utc_to_local(value: Optional[str]) -> Optional[str]:
+    """
+    SQLite CURRENT_TIMESTAMP(UTC, 시간대 표시 없음)를 서버 시간대로 바꾼다. 그대로 보내면 한국 시간보다 9시간 전처럼 보인다.
+    """
+    try:
+        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return value
+    return dt.astimezone().isoformat(timespec="seconds")
 
 def get_env_int(key: str, default: int) -> int:
     try:
