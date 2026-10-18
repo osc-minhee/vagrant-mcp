@@ -101,6 +101,12 @@ class ResourceProvisioner(ABC):
         """
         return None
 
+    def config_vars(self, name: str, manifest: ProvisioningManifest) -> Dict[str, Any]:
+        """
+        환경 구성(Ansible)에 넘길 추가 변수 (extra vars).
+        """
+        return {}
+
     def resource_id(self, name: str) -> str:
         return f"{self.provider_name()}-{name}"
 
@@ -163,8 +169,10 @@ class ResourceProvisioner(ABC):
                 # LIFECYCLE - CONFIGURING
                 await self.update_state(resource_id, ResourceState.CONFIGURING)
 
+                # mcp_target_name: playbook 이 접속한 머신이 이 리소스인지(hostname) 확인하는 데 쓴다.
                 ok, out = await self.config_executor.run_playbook(
-                    target_name=name, target_host=self.config_target(name, manifest)
+                    target_name=name, target_host=self.config_target(name, manifest),
+                    extra_vars={"mcp_target_name": name, **self.config_vars(name, manifest)},
                 )
                 if not ok:
                     raise RuntimeError(f"환경 구성 실패: {_tail(out)}")
