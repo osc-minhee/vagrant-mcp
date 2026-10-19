@@ -1,0 +1,23 @@
+---
+# ansible-core 2.17 부터 대상에 Python 3.8 이상이 필요하다. Rocky/RHEL 8 의 기본 Python(platform-python)은 3.6 이라
+# fact 수집부터 실패하므로, Python 없이 실행되는 raw 로 python3.11 을 먼저 설치하고 그것을 쓰게 한다.
+# base.yml, grow_disk.yml 이 맨 앞에서 import 한다.
+- name: "Python 준비 (Rocky/RHEL 8)"
+  hosts: all
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: "RHEL 8 계열이면 python3.11 설치"
+      raw: |
+        if grep -qE 'release 8(\.|$| )' /etc/redhat-release 2>/dev/null; then
+          echo "el8"
+          command -v python3.11 >/dev/null 2>&1 || { dnf -y -q install python3.11 >/dev/null && echo "installed"; }
+        fi
+      register: py_prepare
+      changed_when: "'installed' in py_prepare.stdout"
+
+    # set_fact 는 MCP 서버(제어 노드)에서 실행되므로 대상의 Python 이 없어도 된다. 다음 play 에도 이어진다.
+    - name: "RHEL 8 계열은 python3.11 사용"
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.11
+      when: "'el8' in py_prepare.stdout"

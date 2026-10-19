@@ -22,7 +22,8 @@ class VagrantVMCreateInput(BaseModel):
         "VM 이름(소문자/숫자/하이픈, 1~32자, 예: sandbox-01)"
     ))
     flavor: Flavor = Field(Flavor.SMALL, description=(
-        "VM 사양, 기본 small (small: 1 vCPU/2GiB, medium: 2 vCPU/4GiB, large: 4 vCPU/8GiB). 사용자가 말하지 않으면 묻지 않는다."
+        "VM 사양, 기본 small (small: 1 vCPU/2GiB/디스크 40GB, medium: 2 vCPU/4GiB/80GB, large: 4 vCPU/8GiB/160GB). "
+        "디스크 크기는 flavor 로만 정한다. 사용자가 말하지 않으면 묻지 않는다."
     ))
     cpu: Optional[int] = Field(None, ge=1, le=32, description=(
         "vCPU 수. 사용자가 vCPU 개수를 말했을 때만 넣고, 아니면 비운다(flavor 의 값). 메모리는 flavor 로 정한다."
@@ -55,7 +56,7 @@ class VagrantVMUpdateInput(BaseModel):
         "변경할 VM 이름(예: sandbox-01)"
     ))
     flavor: Optional[Flavor] = Field(None, description=(
-        "새 VM 사양(small, medium, large). 바꾸지 않으면 비운다."
+        "새 VM 사양(small, medium, large). 바꾸지 않으면 비운다. 디스크는 늘어나기만 하고, 작은 사양으로 바꿔도 줄지 않는다."
     ))
     cpu: Optional[int] = Field(None, ge=1, le=32, description=(
         "새 vCPU 수. 바꾸지 않으면 비운다. flavor 를 함께 바꾸면 flavor 의 vCPU 대신 이 값을 쓴다."

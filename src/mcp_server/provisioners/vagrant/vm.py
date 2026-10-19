@@ -18,11 +18,15 @@ from mcp_server.schemas.base import ProvisioningManifest
 from mcp_server.schemas.vagrant import VagrantVMCreateInput
 from mcp_server.utils import get_env_int, now_local, utc_to_local
 
+# disk_gb: VM 의 기본(primary) 디스크 크기. box 기본 크기보다 작으면 Vagrant 가 줄이지 않고 box 크기를 그대로 쓴다.
 FLAVOR_SPECS = {
-    Flavor.SMALL: {"cpu": 1, "memory": 2048},
-    Flavor.MEDIUM: {"cpu": 2, "memory": 4096},
-    Flavor.LARGE: {"cpu": 4, "memory": 8192},
+    Flavor.SMALL: {"cpu": 1, "memory": 2048, "disk_gb": 40},
+    Flavor.MEDIUM: {"cpu": 2, "memory": 4096, "disk_gb": 80},
+    Flavor.LARGE: {"cpu": 4, "memory": 8192, "disk_gb": 160},
 }
+
+# 생성 후 디스크를 늘렸을 때 VM 안의 root 파티션/파일시스템을 늘리는 playbook
+GROW_DISK_PLAYBOOK = "grow_disk.yml"
 
 # 호스트에서 찾은 사용 중 IP 의 출처 -> 오류 메시지에 쓸 설명
 _ON_HOST_REASONS = {
@@ -320,9 +324,14 @@ class VagrantVMProvisioner(ResourceProvisioner):
                 f"{max(usable, 0)}MiB, 요청한 사양 {flavor.value} 는 {FLAVOR_SPECS[flavor]['memory']}MiB 가 필요합니다. "
                 + (f"이 호스트에서 가능한 사양: {', '.join(fits)}." if fits else "이 호스트에는 어떤 사양도 올릴 수 없으니 다른 호스트를 고르세요.")
             )
-        if info["disk_available_mb"] < min_disk:
+        # VM 디스크는 쓴 만큼만 커지지만(동적 할당), 최대 크기까지 찰 수 있으므로 flavor 의 디스크 크기를 기준으로 본다.
+        need_disk = max(min_disk, FLAVOR_SPECS[flavor]["disk_gb"] * 1024)
+        if info["disk_available_mb"] < need_disk:
+            fits_disk = [f.value for f, spec in FLAVOR_SPECS.items() if max(min_disk, spec["disk_gb"] * 1024) <= info["disk_available_mb"]]
             raise RuntimeError(
-                f"호스트 '{host.name}' 의 디스크 여유가 부족합니다: {info['disk_available_mb']}MiB (최소 {min_disk}MiB 필요)."
+                f"호스트 '{host.name}' 의 디스크 여유가 부족합니다: {info['disk_mount']} 에 {info['disk_available_mb']}MiB, "
+                f"요청한 사양 {flavor.value} 는 {need_disk}MiB 가 필요합니다 (VM 디스크 기준). "
+                + (f"이 호스트에서 가능한 사양: {', '.join(fits_disk)}." if fits_disk else "다른 호스트를 고르세요.")
             )
         if cpu > info["cpu_total"]:
             raise RuntimeError(
@@ -396,6 +405,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
             # flavor 를 바꾸면 memory 는 flavor 값, cpu 는 요청의 cpu 가 있으면 그것, 없으면 flavor 값.
             manifest.vars["memory"] = spec["memory"]
             manifest.vars["cpu"] = params.cpu or spec["cpu"]
+            # 디스크는 줄일 수 없으므로 늘어날 때만 바꾼다. (작은 flavor 로 바꿔도 디스크는 그대로)
+            manifest.vars["disk_gb"] = max(int(current.vars.get("disk_gb") or 0), spec["disk_gb"])
         else:
             # cpu 만 바꾸면 위 super() 에서 이미 반영됐다. 값이 없는 기존 리소스는 flavor 값으로 채운다.
             manifest.vars.setdefault("cpu", spec["cpu"])
@@ -413,6 +424,12 @@ class VagrantVMProvisioner(ResourceProvisioner):
             return self.infra_executor.host_of(vars).name
         except RuntimeError:
             return vars.get("host") or None
+
+    def update_playbook(self, current: ProvisioningManifest, new: ProvisioningManifest) -> Optional[str]:
+        # 디스크가 커졌으면 VM 안의 파티션/파일시스템도 늘린다. (Vagrant 는 디스크 파일만 키운다)
+        if int(new.vars.get("disk_gb") or 0) > int(current.vars.get("disk_gb") or 0):
+            return GROW_DISK_PLAYBOOK
+        return None
 
     def config_target(self, name: str, manifest: ProvisioningManifest) -> Optional[str]:
         return manifest.vars.get("ip")
@@ -441,6 +458,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
         # cpu 를 따로 지정했으면 flavor 와 다를 수 있어 실제 값을 함께 보여 준다.
         item["cpu"] = vars.get("cpu")
         item["memory_mb"] = vars.get("memory")
+        # 기록이 없는 기존 리소스는 box 기본 크기라 None
+        item["disk_gb"] = vars.get("disk_gb")
         item["purpose"] = vars.get("purpose") or "N/A"
         item["ip"] = vars.get("ip") or "N/A"
         # image 기록이 없는 기존 리소스는 box 만 보여 준다.
@@ -579,6 +598,9 @@ class VagrantVMProvisioner(ResourceProvisioner):
             ("disk_available_mb", "disk_available_gi"),
         ):
             info[dst] = _gi(info[src])
+        for disk in info.get("disks", []):
+            disk["total_gi"] = _gi(disk["total_mb"])
+            disk["available_gi"] = _gi(disk["available_mb"])
         return info
 
     async def list_hosts(self) -> List[Dict[str, Any]]:

@@ -103,6 +103,12 @@ class ResourceProvisioner(ABC):
         changes = params.model_dump(mode="json", exclude_none=True, exclude={"name"})
         return current.model_copy(update={"vars": {**current.vars, **changes}})
 
+    def update_playbook(self, current: ProvisioningManifest, new: ProvisioningManifest) -> Optional[str]:
+        """
+        변경 후 실행할 환경 구성(Ansible) playbook. None 이면 변경 때는 환경 구성을 하지 않는다.
+        """
+        return None
+
     def config_target(self, name: str, manifest: ProvisioningManifest) -> Optional[str]:
         """
         환경 구성(Ansible) 대상 주소. None 이면 인벤토리에서 name 으로 찾는다.
@@ -234,6 +240,19 @@ class ResourceProvisioner(ABC):
                 raise RuntimeError(f"업데이트 확인 실패: {message}")
             if message:
                 self.logger.warning(f"[{resource_id}] {message}")
+
+            playbook = self.update_playbook(current, new)
+            if playbook and self.config_executor:
+                # LIFECYCLE - CONFIGURING
+                await self.update_state(resource_id, ResourceState.CONFIGURING)
+                name = _label(resource_id, new)
+                ok, out = await self.config_executor.run_playbook(
+                    target_name=name, target_host=self.config_target(name, new), playbook_name=playbook,
+                    extra_vars={"mcp_target_name": name, **self.config_vars(name, new)},
+                )
+                if not ok:
+                    raise RuntimeError(f"환경 구성 실패: {_tail(out)}")
+
             # 이전 경고는 지우고, 이번 확인의 경고만 남긴다.
             await self.update_state(resource_id, ResourceState.RUNNING, {**new.model_dump(exclude={"last_warning"}), **({"last_warning": message} if message else {})})
             await notify(f"✅ '{_label(resource_id, new)}' 변경 완료{_where(new)}" + (f"\n⚠️ {message}" if message else ""))

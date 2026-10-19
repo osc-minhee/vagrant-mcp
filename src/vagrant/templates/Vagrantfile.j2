@@ -20,6 +20,12 @@ Vagrant.configure("2") do |config|
   config.vm.network "public_network", ip: "{{ ip }}"
 {% endif %}
 
+{% if disk_gb %}
+  # 기본(primary) 디스크 크기 (flavor). 늘리기만 하고 줄이지 않는다. VM 안의 파티션은 Ansible 이 늘린다.
+  # Vagrant 실험 기능이라 VAGRANT_EXPERIMENTAL=disks 로 실행한다 (MCP 서버가 설정).
+  config.vm.disk :disk, size: "{{ disk_gb }}GB", primary: true
+{% endif %}
+
   config.vm.provider "virtualbox" do |vb|
     vb.name = "{{ resource_id }}"
     vb.cpus = {{ cpu }}
