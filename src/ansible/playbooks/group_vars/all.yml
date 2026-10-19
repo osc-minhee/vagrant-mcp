@@ -1,4 +1,5 @@
 ---
+# 설치할 패키지 목록 
 # Vagrant box 의 vagrant 계정은 비밀번호 없이 sudo 가 가능하다.
 ansible_become: yes
 ansible_become_method: sudo

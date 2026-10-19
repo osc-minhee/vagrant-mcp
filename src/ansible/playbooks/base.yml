@@ -2,15 +2,13 @@
 # Rocky/RHEL 8 은 python3.11 을 먼저 준비한다 (prepare_python.yml 참고).
 - import_playbook: prepare_python.yml
 
-- name: "샌드박스 서버 기초 환경 설정"
+- name: "서버 기초 환경 설정"
   hosts: all
-  become: yes
+  become: yes #sudo로 실행 
   gather_facts: yes
 
   # Debian/Ubuntu(apt) 와 RedHat 계열(Rocky, dnf)을 지원한다.
   pre_tasks:
-    # IP 로 접속하므로, 그 IP 를 다른 장비가 쓰고 있으면(IP 충돌) 엉뚱한 머신을 설정하게 된다.
-    # Vagrantfile 이 hostname 을 VM 이름으로 정하므로, 다르면 아무것도 바꾸지 않고 멈춘다.
     - name: "대상 VM 확인 (IP 충돌 방지)"
       assert:
         that: ansible_facts['hostname'] == mcp_target_name
@@ -117,7 +115,6 @@
       when: ansible_facts['os_family'] == "RedHat"
 
     # ---------- SSH 비밀번호 로그인 (내부망 테스트/시연용, group_vars 의 ssh_password_auth) ----------
-    # 브리지 네트워크라 같은 LAN 에서 누구나 접속을 시도할 수 있다. 외부에 노출되는 망에서는 끈다.
     - name: "vagrant 계정 비밀번호 설정"
       command: chpasswd
       args:
@@ -127,7 +124,6 @@
       when: ssh_password_auth | bool
 
     # 'PasswordAuthentication no' 를 yes 로 바꾼다. Ubuntu box 는 본문이 아니라 sshd_config.d/60-cloudimg-settings.conf 에 no 가 있다.
-    # no 가 없는 OS(Rocky 등)는 기본값이 yes 라 바꿀 것이 없다.
     - name: "SSH 비밀번호 로그인 허용 (PasswordAuthentication no -> yes)"
       shell: |
         shopt -s nullglob
