@@ -291,13 +291,15 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
         raise RuntimeError(f"호스트 '{host.name}' 의 IP 대역 안에 사용할 수 있는 IP 가 없습니다. (전체 {len(host.ip_pool)}개)")
 
-    async def _check_capacity(self, host: VagrantHost, flavor: Flavor, cpu: int) -> None:
+    async def _check_capacity(
+        self, host: VagrantHost, cpu: Optional[int] = None, memory_mb: int = 0, disk_mb: int = 0, change: bool = False
+    ) -> None:
         """
-        호스트에 VM 을 올릴 여유가 있는지 확인하고, 없으면 RuntimeError 로 거절한다.
-        기준은 일부러 느슨하다: 가용 메모리(MemAvailable) >= 요청 사양 + 예비, 디스크 여유 >= 최소 여유,
-        vCPU <= 호스트 전체 CPU 수. (CPU 부하나 다른 VM 의 vCPU 합계는 보지 않는다)
-        오버커밋(실행 중 VM 할당 합계)은 따지지 않고, 이 서버가 방금 시작시킨 VM 은 아직 반영되지 않을 수 있다.
-        VAGRANT_RESOURCE_CHECK=false 면 확인하지 않는다.
+        호스트에 VM 을 올릴 여유가 있는지 확인하고, 없으면 RuntimeError 로 거절한다. (메모리/디스크를 직접 지정해도 이것이 상한이다)
+        기준은 일부러 느슨하다: 가용 메모리(MemAvailable) >= 요청 메모리 + 예비, VM 디스크 마운트 여유 >= 요청 디스크(최소 여유 이상),
+        vCPU <= 호스트 전체 CPU 수. (CPU 부하나 다른 VM 의 vCPU 합계, 메모리 오버커밋은 보지 않는다)
+        change=True 면 변경 요청이며, memory_mb/disk_mb 는 늘어나는 양이다. 0 이하면 그 항목은 확인하지 않는다.
+        이 서버가 방금 시작시킨 VM 은 아직 반영되지 않을 수 있다. VAGRANT_RESOURCE_CHECK=false 면 확인하지 않는다.
         """
         if os.getenv("VAGRANT_RESOURCE_CHECK", "true").lower() == "false":
             return
@@ -310,30 +312,34 @@ class VagrantVMProvisioner(ResourceProvisioner):
             return
         except Exception as e:
             raise RuntimeError(redact_text(
-                f"호스트 '{host.name}' 에 접속하거나 자원을 조회하지 못해 생성하지 않았습니다: {type(e).__name__}: {e}"
+                f"호스트 '{host.name}' 에 접속하거나 자원을 조회하지 못해 {'변경' if change else '생성'}하지 않았습니다: {type(e).__name__}: {e}"
             )) from e
 
+        what = "늘리려는" if change else "요청한"
         reserve = get_env_int("VAGRANT_HOST_MEM_RESERVE_MB", 512)
         min_disk = get_env_int("VAGRANT_MIN_DISK_FREE_MB", 5120)
-        usable = info["mem_available_mb"] - reserve
-        fits = [f.value for f, spec in FLAVOR_SPECS.items() if spec["memory"] <= usable]
 
-        if FLAVOR_SPECS[flavor]["memory"] > usable:
+        usable = info["mem_available_mb"] - reserve
+        if memory_mb > 0 and memory_mb > usable:
+            fits = [f.value for f, spec in FLAVOR_SPECS.items() if spec["memory"] <= usable]
             raise RuntimeError(
                 f"호스트 '{host.name}' 의 가용 메모리가 부족합니다: 가용 {info['mem_available_mb']}MiB - 호스트 예비 {reserve}MiB = "
-                f"{max(usable, 0)}MiB, 요청한 사양 {flavor.value} 는 {FLAVOR_SPECS[flavor]['memory']}MiB 가 필요합니다. "
-                + (f"이 호스트에서 가능한 사양: {', '.join(fits)}." if fits else "이 호스트에는 어떤 사양도 올릴 수 없으니 다른 호스트를 고르세요.")
+                f"{max(usable, 0)}MiB, {what} 메모리는 {memory_mb}MiB 입니다. "
+                + (f"이 호스트에서 지금 더 쓸 수 있는 메모리는 최대 {max(usable, 0) // 1024}GiB 입니다"
+                   + (f" (가능한 flavor: {', '.join(fits)})." if fits and not change else "."))
             )
-        # VM 디스크는 쓴 만큼만 커지지만(동적 할당), 최대 크기까지 찰 수 있으므로 flavor 의 디스크 크기를 기준으로 본다.
-        need_disk = max(min_disk, FLAVOR_SPECS[flavor]["disk_gb"] * 1024)
-        if info["disk_available_mb"] < need_disk:
-            fits_disk = [f.value for f, spec in FLAVOR_SPECS.items() if max(min_disk, spec["disk_gb"] * 1024) <= info["disk_available_mb"]]
-            raise RuntimeError(
-                f"호스트 '{host.name}' 의 디스크 여유가 부족합니다: {info['disk_mount']} 에 {info['disk_available_mb']}MiB, "
-                f"요청한 사양 {flavor.value} 는 {need_disk}MiB 가 필요합니다 (VM 디스크 기준). "
-                + (f"이 호스트에서 가능한 사양: {', '.join(fits_disk)}." if fits_disk else "다른 호스트를 고르세요.")
-            )
-        if cpu > info["cpu_total"]:
+
+        # VM 디스크는 쓴 만큼만 커지지만(동적 할당), 최대 크기까지 찰 수 있으므로 요청 크기를 기준으로 본다.
+        if disk_mb > 0:
+            need_disk = max(min_disk, disk_mb)
+            if info["disk_available_mb"] < need_disk:
+                raise RuntimeError(
+                    f"호스트 '{host.name}' 의 디스크 여유가 부족합니다: {info['disk_mount']} 에 {info['disk_available_mb']}MiB, "
+                    f"{what} 디스크는 {need_disk}MiB 입니다 (VM 디스크 기준). "
+                    f"이 호스트에서 지금 지정할 수 있는 디스크는 최대 {info['disk_available_mb'] // 1024}GB 입니다."
+                )
+
+        if cpu is not None and cpu > info["cpu_total"]:
             raise RuntimeError(
                 f"호스트 '{host.name}' 의 CPU 는 {info['cpu_total']}개라 vCPU {cpu}개를 줄 수 없습니다. {info['cpu_total']}개 이하로 지정하세요."
             )
@@ -373,9 +379,11 @@ class VagrantVMProvisioner(ResourceProvisioner):
         # 끝자리(75)로 준 ip 는 여기서 전체 IP 로 바뀐다.
         host, ip = self._resolve_target(params.host, params.ip)
         spec = FLAVOR_SPECS[params.flavor]
-        # 요청의 cpu 가 있으면 flavor 의 vCPU 대신 쓴다. 메모리는 flavor 로만 정한다.
+        # 요청의 cpu/memory_gb/disk_gb 가 있으면 flavor 값 대신 쓴다. 상한은 호스트 여유(_check_capacity)다.
         cpu = params.cpu or spec["cpu"]
-        await self._check_capacity(host, params.flavor, cpu)
+        memory = params.memory_gb * 1024 if params.memory_gb else spec["memory"]
+        disk_gb = params.disk_gb or spec["disk_gb"]
+        await self._check_capacity(host, cpu=cpu, memory_mb=memory, disk_mb=disk_gb * 1024)
         # 요청의 project, 없으면 호스트의 기본 프로젝트. 둘 다 없으면 None (workdir 바로 아래)
         project = params.project or host.default_project
         resource_id = self.resource_id(params.name)
@@ -383,9 +391,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
             host, project, params.dir_name or resource_id, resource_id, check_host=bool(params.dir_name)
         )
         # 만든 사람(user)은 DB 의 created_by 에 따로 남기므로 vars 에 넣지 않는다.
-        vars = params.model_dump(mode="json", exclude={"user"})
-        vars.update(spec)
-        vars["cpu"] = cpu
+        vars = params.model_dump(mode="json", exclude={"user", "memory_gb"})
+        vars.update(cpu=cpu, memory=memory, disk_gb=disk_gb)
         vars.update({
             "host": host.name,
             "project": project,
@@ -400,17 +407,51 @@ class VagrantVMProvisioner(ResourceProvisioner):
 
     async def prepare_update(self, params: Any, current: ProvisioningManifest) -> ProvisioningManifest:
         manifest = await super().prepare_update(params, current)
-        spec = FLAVOR_SPECS[Flavor(manifest.vars["flavor"])]
+        vars = manifest.vars
+        # memory_gb 는 memory(MiB) 로 바꿔 저장하고, disk_gb 는 아래에서 줄지 않게 다시 정한다.
+        vars.pop("memory_gb", None)
+        vars.pop("disk_gb", None)
+        spec = FLAVOR_SPECS[Flavor(vars["flavor"])]
+        cur_spec = FLAVOR_SPECS.get(Flavor(current.vars.get("flavor") or Flavor.SMALL), spec)
+        cur_cpu = int(current.vars.get("cpu") or cur_spec["cpu"])
+        cur_memory = int(current.vars.get("memory") or cur_spec["memory"])
+        cur_disk = int(current.vars.get("disk_gb") or 0)
+
+        disk = None
         if params.flavor is not None:
-            # flavor 를 바꾸면 memory 는 flavor 값, cpu 는 요청의 cpu 가 있으면 그것, 없으면 flavor 값.
-            manifest.vars["memory"] = spec["memory"]
-            manifest.vars["cpu"] = params.cpu or spec["cpu"]
-            # 디스크는 줄일 수 없으므로 늘어날 때만 바꾼다. (작은 flavor 로 바꿔도 디스크는 그대로)
-            manifest.vars["disk_gb"] = max(int(current.vars.get("disk_gb") or 0), spec["disk_gb"])
+            # flavor 를 바꾸면 그 flavor 값으로 바꾸고, 따로 준 cpu/memory_gb/disk_gb 가 있으면 그 값이 우선한다.
+            vars["memory"] = spec["memory"]
+            vars["cpu"] = spec["cpu"]
+            disk = spec["disk_gb"]
         else:
-            # cpu 만 바꾸면 위 super() 에서 이미 반영됐다. 값이 없는 기존 리소스는 flavor 값으로 채운다.
-            manifest.vars.setdefault("cpu", spec["cpu"])
-            manifest.vars.setdefault("memory", spec["memory"])
+            # 값이 없는 기존 리소스는 flavor 값으로 채운다.
+            vars.setdefault("cpu", spec["cpu"])
+            vars.setdefault("memory", spec["memory"])
+        if params.cpu is not None:
+            vars["cpu"] = params.cpu
+        if params.memory_gb is not None:
+            vars["memory"] = params.memory_gb * 1024
+        if params.disk_gb is not None:
+            if params.disk_gb < cur_disk:
+                raise ValueError(f"디스크는 줄일 수 없습니다: 현재 {cur_disk}GB 이고 요청은 {params.disk_gb}GB 입니다. {cur_disk}GB 이상으로 지정하세요.")
+            disk = params.disk_gb
+        # 디스크는 줄일 수 없으므로 늘어날 때만 바꾼다. (작은 flavor 로 바꿔도 디스크는 그대로)
+        if disk is not None and max(cur_disk, disk) > 0:
+            vars["disk_gb"] = max(cur_disk, disk)
+        elif cur_disk:
+            vars["disk_gb"] = cur_disk
+
+        # 늘어나는 양만큼 호스트 여유를 확인한다. (줄이거나 그대로면 확인하지 않는다)
+        new_cpu, new_memory, new_disk = int(vars["cpu"]), int(vars["memory"]), int(vars.get("disk_gb") or 0)
+        if new_cpu > cur_cpu or new_memory > cur_memory or new_disk > cur_disk:
+            await self._check_capacity(
+                self.infra_executor.host_of(vars),
+                cpu=new_cpu if new_cpu > cur_cpu else None,
+                memory_mb=new_memory - cur_memory,
+                # 기록이 없는 기존 VM 은 box 기본 크기를 몰라 요청 크기 전체로 본다.
+                disk_mb=(new_disk - cur_disk) * 1024,
+                change=True,
+            )
         # IP 등 할당된 값은 그대로 둔다.
         # host 기록이 없는 기존 리소스는 IP 로 찾은 호스트를 기록해 둔다. (찾지 못하면 변경하지 않고 오류)
         manifest.vars["host"] = self.infra_executor.host_of(manifest.vars).name
@@ -596,6 +637,8 @@ class VagrantVMProvisioner(ResourceProvisioner):
             ("vbox_mem_allocated_mb", "vbox_mem_allocated_gi"),
             ("disk_total_mb", "disk_total_gi"),
             ("disk_available_mb", "disk_available_gi"),
+            ("disks_total_mb", "disks_total_gi"),
+            ("disks_available_mb", "disks_available_gi"),
         ):
             info[dst] = _gi(info[src])
         for disk in info.get("disks", []):

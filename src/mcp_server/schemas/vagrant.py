@@ -19,14 +19,21 @@ IP_SPEC_DESCRIPTION = (
 
 class VagrantVMCreateInput(BaseModel):
     name: str = Field(..., pattern=NAME_PATTERN, description=(
-        "VM 이름(소문자/숫자/하이픈, 1~32자, 예: sandbox-01)"
+        "VM 이름이자 VM 의 hostname(소문자/숫자/하이픈, 1~32자, 예: sandbox-01). 유일한 필수 값이다. "
+        "사용자가 말하지 않았으면 이것만 묻는다."
     ))
     flavor: Flavor = Field(Flavor.SMALL, description=(
         "VM 사양, 기본 small (small: 1 vCPU/2GiB/디스크 40GB, medium: 2 vCPU/4GiB/80GB, large: 4 vCPU/8GiB/160GB). "
-        "디스크 크기는 flavor 로만 정한다. 사용자가 말하지 않으면 묻지 않는다."
+        "cpu, memory_gb, disk_gb 를 주면 그 항목만 flavor 값 대신 쓴다. 사용자가 말하지 않으면 묻지 않는다."
     ))
     cpu: Optional[int] = Field(None, ge=1, le=32, description=(
-        "vCPU 수. 사용자가 vCPU 개수를 말했을 때만 넣고, 아니면 비운다(flavor 의 값). 메모리는 flavor 로 정한다."
+        "vCPU 수. 사용자가 vCPU 개수를 말했을 때만 넣고, 아니면 비운다(flavor 의 값). 호스트 CPU 수 이하여야 한다."
+    ))
+    memory_gb: Optional[int] = Field(None, ge=1, le=256, description=(
+        "메모리(GiB). 사용자가 메모리 크기를 말했을 때만 넣고, 아니면 비운다(flavor 의 값). 호스트 가용 메모리가 상한이다."
+    ))
+    disk_gb: Optional[int] = Field(None, ge=10, le=2048, description=(
+        "디스크(GB). 사용자가 디스크 크기를 말했을 때만 넣고, 아니면 비운다(flavor 의 값). 호스트의 VM 디스크 여유가 상한이다."
     ))
     purpose: str = Field("dev", pattern=PURPOSE_PATTERN, description="VM 용도, 기본 dev. 사용자가 말하지 않으면 묻지 않는다.")
     image: Image = Field(Image.UBUNTU_2204, description=(
@@ -60,6 +67,12 @@ class VagrantVMUpdateInput(BaseModel):
     ))
     cpu: Optional[int] = Field(None, ge=1, le=32, description=(
         "새 vCPU 수. 바꾸지 않으면 비운다. flavor 를 함께 바꾸면 flavor 의 vCPU 대신 이 값을 쓴다."
+    ))
+    memory_gb: Optional[int] = Field(None, ge=1, le=256, description=(
+        "새 메모리(GiB). 바꾸지 않으면 비운다. flavor 를 함께 바꾸면 flavor 의 메모리 대신 이 값을 쓴다. 늘릴 때는 호스트 가용 메모리가 상한이다."
+    ))
+    disk_gb: Optional[int] = Field(None, ge=10, le=2048, description=(
+        "새 디스크(GB). 바꾸지 않으면 비운다. 현재보다 크게만 지정할 수 있다(줄일 수 없음). 늘리는 양은 호스트의 VM 디스크 여유가 상한이다."
     ))
     purpose: Optional[str] = Field(None, pattern=PURPOSE_PATTERN, description=(
         "새 VM 용도. 바꾸지 않으면 비운다."
