@@ -1,0 +1,62 @@
+---
+# root(/) 파티션과 파일시스템을 디스크 끝까지 늘린다. (base.yml, grow_disk.yml 에서 include)
+# Vagrant 는 flavor 의 디스크 크기로 디스크 파일만 키우므로, VM 안에서 파티션 -> (LVM) -> 파일시스템 순으로 늘려야 쓸 수 있다.
+# 일반 파티션(Ubuntu cloud 이미지)과 LVM 모두, ext4/xfs 를 지원한다. 이미 끝까지 늘어나 있으면 아무것도 바꾸지 않는다.
+# root 파티션 뒤에 다른 파티션(swap 등)이 있으면 늘릴 수 없어 그대로 두고, 결과의 크기로 확인한다.
+
+- name: "growpart 설치 (Debian)"
+  apt:
+    name: cloud-guest-utils
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: "growpart 설치 (RedHat)"
+  dnf:
+    name: cloud-utils-growpart
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: "root 파티션/파일시스템 늘리기"
+  shell: |
+    set -e
+    src="$(findmnt -n -o SOURCE /)"
+    fstype="$(findmnt -n -o FSTYPE /)"
+
+    # 파티션이면 그 디스크의 끝까지 늘린다. 이미 끝까지면 growpart 가 NOCHANGE 를 낸다.
+    grow_part() {
+      name="$(basename "$(readlink -f "$1")")"
+      [ -f "/sys/class/block/$name/partition" ] || return 0
+      disk="$(lsblk -no PKNAME "/dev/$name" | head -n1)"
+      num="$(cat "/sys/class/block/$name/partition")"
+      if out="$(growpart "/dev/$disk" "$num" 2>&1)"; then
+        echo "changed: $out"
+      else
+        echo "$out" | grep -q NOCHANGE || { echo "$out" >&2; exit 1; }
+      fi
+    }
+
+    if [ "$(lsblk -no TYPE "$src" | head -n1)" = lvm ]; then
+      vg="$(lvs --noheadings -o vg_name "$src" | tr -d ' ')"
+      for pv in $(pvs --noheadings -o pv_name -S "vg_name=$vg" | tr -d ' '); do
+        grow_part "$pv"
+        pvresize "$pv" >/dev/null
+      done
+      if [ "$(vgs --noheadings -o vg_free_count "$vg" | tr -d ' ')" -gt 0 ]; then
+        lvextend -r -l +100%FREE "$src" >/dev/null && echo "changed: lvextend"
+      fi
+    else
+      grow_part "$src"
+      case "$fstype" in
+        ext2|ext3|ext4) resize2fs "$src" 2>&1 | grep -q "Nothing to do" || echo "changed: resize2fs" ;;
+        xfs) xfs_growfs / | grep -q "data blocks changed" && echo "changed: xfs_growfs" || true ;;
+      esac
+    fi
+    echo "ROOT_SIZE=$(df -h --output=size / | tail -n1 | tr -d ' ')"
+  register: grow_root
+  changed_when: "'changed:' in grow_root.stdout"
+
+- name: "root 디스크 크기 출력"
+  debug:
+    msg: "{{ grow_root.stdout_lines | select('match', '^ROOT_SIZE=') | first | default('') }}"

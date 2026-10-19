@@ -1,0 +1,23 @@
+---
+# vg_update_vm 으로 디스크가 커졌을 때(flavor 변경) MCP 서버가 실행한다. root 파티션/파일시스템만 늘린다.
+- import_playbook: prepare_python.yml
+
+- name: "디스크 확장"
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    # base.yml 과 같다: IP 로 접속하므로 다른 머신이면 아무것도 바꾸지 않고 멈춘다.
+    - name: "대상 VM 확인 (IP 충돌 방지)"
+      assert:
+        that: ansible_facts['hostname'] == mcp_target_name
+        fail_msg: >-
+          IP {{ inventory_hostname }} 로 접속한 머신의 hostname 이 '{{ ansible_facts['hostname'] }}' 입니다
+          ('{{ mcp_target_name }}' 이어야 합니다). 이 IP 를 다른 장비가 쓰고 있습니다(IP 충돌).
+        quiet: true
+      when: mcp_target_name is defined
+
+  tasks:
+    - name: "root 디스크 늘리기"
+      include_tasks: tasks/grow_root.yml

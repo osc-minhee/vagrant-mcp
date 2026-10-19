@@ -52,7 +52,8 @@ async def vg_check_ip(
     "이 도구는 사용 시 다음 규칙을 준수해야 한다.\n"
     "1. 반드시 업데이트할 대상 VM의 정확한 name 파라미터를 포함해야 한다.\n"
     "2. flavor(사양), cpu(vCPU 수), purpose(용도) 중 변경하려는 파라미터만 포함하여 전달한다. 빠진 값은 기존 값을 유지한다.\n"
-    "3. VM이 재시작되므로 호출 전에 사용자에게 확인을 받는다."
+    "3. VM이 재시작되므로 호출 전에 사용자에게 확인을 받는다.\n"
+    "4. flavor 를 키우면 디스크도 그 flavor 크기로 늘어난다(VM 안의 파티션까지 늘린다). 디스크는 줄일 수 없어서 작은 flavor 로 바꿔도 디스크는 그대로이니 사용자에게 알린다."
 ))
 async def vg_update_vm(params: VagrantVMUpdateInput):
     return await vg_vm.update(params)
@@ -69,6 +70,8 @@ async def vg_destroy_vm(params: VagrantVMDestroyInput):
     "Vagrant 호스트 목록과 각 호스트의 자원 현황을 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
     "사용자가 호스트 상태를 묻거나 어느 호스트에 만들지 고를 때만 호출한다. VM 생성 전에 매번 호출하지 않는다.\n"
     "호스트마다 CPU, 메모리/디스크(사용자에게는 *_gi 로 보여준다), vbox_*(실행 중인 VM 전체 합계), managed_vms(이 서버가 만든 VM 수), "
+    "disk_* 는 VM 디스크가 생기는 파일시스템(disk_mount, disk_basis=vm_disks) 기준이고, disks 에 용도별(vm_disks: VM 디스크, workdir: Vagrantfile, boxes: box 캐시, root: /) 마운트와 여유가 있다. "
+    "디스크 용량을 말할 때는 disk_mount 를 함께 전한다. "
     "ip_available(남은 IP 수), ip_used_by_others(대역 안을 이 서버가 만들지 않은 VM 이 쓰는 수)가 있고, 접속 실패는 reachable=false 와 error 로 온다.\n"
     "호스트에 있는 VM 하나하나를 보려면 vg_list_host_vms 를 쓴다."
 ))

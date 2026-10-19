@@ -18,6 +18,7 @@ from mcp_server.core.redact import redact_text
 # 이미 실행 중이면 reload(사양 변경 반영), 아니면 up(최초 생성 또는 기동).
 _APPLY_SCRIPT = r"""
 command -v vagrant >/dev/null 2>&1 || { echo "호스트에 vagrant 가 설치되어 있지 않습니다." >&2; exit 14; }
+__EXPERIMENTAL__
 DIR=__DIR__
 mkdir -p "$DIR" && cd "$DIR" || { echo "작업 폴더를 만들 수 없습니다: $DIR" >&2; exit 15; }
 echo __VF_B64__ | base64 -d > Vagrantfile.new && mv Vagrantfile.new Vagrantfile || exit 15
@@ -39,6 +40,7 @@ if [ -d "$DIR" ]; then
   cd "$DIR" || exit 15
   if [ -f Vagrantfile ]; then
     command -v vagrant >/dev/null 2>&1 || { echo "호스트에 vagrant 가 설치되어 있지 않습니다." >&2; exit 14; }
+    __EXPERIMENTAL__
     vagrant destroy -f 2>&1 </dev/null || exit $?
   fi
   cd / && rm -rf -- "$DIR" || exit 15
@@ -51,15 +53,34 @@ fi
 true
 """
 
+# Vagrantfile 의 config.vm.disk(디스크 크기)는 Vagrant 실험 기능이라 켜 둔다. 호스트에 이미 설정된 값이 있으면 뒤에 붙인다.
+_EXPERIMENTAL = 'export VAGRANT_EXPERIMENTAL="${VAGRANT_EXPERIMENTAL:+$VAGRANT_EXPERIMENTAL,}disks"'
+
 # 호스트의 CPU/메모리/디스크 여유와 VirtualBox 에서 실행 중인 VM 의 할당 합계를 KEY=값 으로 출력한다.
-# workdir 는 아직 없을 수 있으므로(첫 생성 때 만든다) 존재하는 가장 가까운 상위 폴더의 디스크를 본다.
+# 디스크는 용도별로 본다. VM 디스크(.vdi/.vmdk)는 workdir 가 아니라 VirtualBox 의 Default machine folder 에 생기므로
+# 그 폴더(VMDIR, 설정값이 없으면 VBoxManage 로 확인)의 파일시스템이 VM 용량 기준이다.
+#  WD_*: workdir (Vagrantfile, .vagrant)   VM_*: VM 디스크 폴더   BOX_*: Vagrant box 캐시 (VAGRANT_HOME, 기본 ~/.vagrant.d)
+# 폴더는 아직 없을 수 있으므로(첫 생성 때 만든다) 존재하는 가장 가까운 상위 폴더의 디스크를 본다.
 _INSPECT_SCRIPT = r"""
-D=__WD__
-while [ ! -d "$D" ] && [ "$D" != "/" ] && [ "$D" != "." ]; do D="$(dirname "$D")"; done
+disk() {
+  D="$1"
+  while [ ! -d "$D" ] && [ "$D" != "/" ] && [ "$D" != "." ]; do D="$(dirname "$D")"; done
+  # 장치 이름이나 마운트 경로에 공백이 있을 수 있으므로 뒤에서부터 센다. (뒤 6번째 열부터는 Filesystem 이름의 일부)
+  df -P -m "$D" 2>/dev/null | awk -v k="$2" 'NR>=2 {line=$0} END {
+    n=split(line, f, /[ \t]+/); for (i=n-4; i>=1; i--) if (f[i+3] ~ /%$/) {print k"_TOTAL="f[i]; print k"_AVAIL="f[i+2]; m=f[i+4]; for (j=i+5; j<=n; j++) m=m" "f[j]; print k"_MOUNT="m; exit}
+  }'
+}
 echo "CPU_TOTAL=$(nproc)"
 echo "LOAD1=$(cut -d' ' -f1 /proc/loadavg)"
 awk '/^MemTotal:/ {print "MEM_TOTAL=" int($2/1024)} /^MemAvailable:/ {print "MEM_AVAIL=" int($2/1024)}' /proc/meminfo
-df -P -m "$D" | awk 'NR==2 {print "DISK_TOTAL="$2; print "DISK_AVAIL="$4}'
+disk __WD__ WD
+VMDIR=__VMDIR__
+if [ -z "$VMDIR" ] && command -v VBoxManage >/dev/null 2>&1; then
+  VMDIR="$(VBoxManage list systemproperties 2>/dev/null </dev/null | sed -n 's/^Default machine folder:[[:space:]]*//p' | head -n1)"
+fi
+[ -n "$VMDIR" ] && disk "$VMDIR" VM
+disk "${VAGRANT_HOME:-$HOME/.vagrant.d}" BOX
+disk / ROOT
 if command -v vagrant >/dev/null 2>&1; then echo "VAGRANT=$(vagrant --version 2>/dev/null </dev/null | head -n1)"; fi
 if command -v VBoxManage >/dev/null 2>&1; then
   echo "VBOX=$(VBoxManage --version 2>/dev/null </dev/null | head -n1)"
@@ -296,6 +317,7 @@ class VagrantExecutor(InfraExecutor):
         vagrantfile = self.render(resource_id, vars)
         script = (
             _APPLY_SCRIPT
+            .replace("__EXPERIMENTAL__", _EXPERIMENTAL)
             .replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
             .replace("__VF_B64__", base64.b64encode(vagrantfile.encode()).decode())
         )
@@ -308,6 +330,7 @@ class VagrantExecutor(InfraExecutor):
         project_dir = sh_path(f"{host.workdir}/{project}") if project else "''"
         script = (
             _DESTROY_SCRIPT
+            .replace("__EXPERIMENTAL__", _EXPERIMENTAL)
             .replace("__DIR__", sh_path(self._vm_dir(host, resource_id, vars)))
             .replace("__PROJ__", project_dir)
         )
@@ -531,7 +554,10 @@ class VagrantExecutor(InfraExecutor):
         접속 실패 등은 예외로 올라가므로 호출하는 쪽에서 처리한다. VirtualBox 가 없으면 vbox_* 값은 None.
         메모리/디스크 단위는 MiB 이다.
         """
-        result = await host.runner.run(_INSPECT_SCRIPT.replace("__WD__", sh_path(host.workdir)), timeout=30)
+        script = _INSPECT_SCRIPT.replace("__WD__", sh_path(host.workdir)).replace(
+            "__VMDIR__", sh_path(host.vm_disk_path) if host.vm_disk_path else "''"
+        )
+        result = await host.runner.run(script, timeout=30)
         if result.exit_code != 0:
             raise HostInspectError(f"호스트 조회 실패 (exit={result.exit_code}): {redact_text(result.stderr.strip())[:200]}")
 
@@ -551,10 +577,28 @@ class VagrantExecutor(InfraExecutor):
                 "cpu_free_estimate": round(max(cpu_total - load, 0.0), 2),
                 "mem_total_mb": int(values["MEM_TOTAL"]),
                 "mem_available_mb": int(values["MEM_AVAIL"]),
-                "disk_total_mb": int(values["DISK_TOTAL"]),
-                "disk_available_mb": int(values["DISK_AVAIL"]),
             }
-        except (KeyError, ValueError) as e:
+            disks: Dict[str, Dict[str, Any]] = {}
+            # root(/)는 다른 용도와 같은 파일시스템이어도 항상 목록에 나오도록 함께 잰다.
+            for prefix, role in (("VM", "vm_disks"), ("WD", "workdir"), ("BOX", "boxes"), ("ROOT", "root")):
+                if f"{prefix}_TOTAL" not in values:
+                    continue
+                mount = values.get(f"{prefix}_MOUNT") or "?"
+                # 같은 파일시스템이면 한 항목으로 합친다.
+                disks.setdefault(mount, {
+                    "mount": redact_text(mount), "roles": [],
+                    "total_mb": int(values[f"{prefix}_TOTAL"]), "available_mb": int(values[f"{prefix}_AVAIL"]),
+                })["roles"].append(role)
+            # VM 디스크 폴더를 찾지 못하면(VirtualBox 없음 등) workdir 의 디스크로 판단한다.
+            basis = next(d for d in disks.values() if ("vm_disks" in d["roles"] or "workdir" in d["roles"]))
+            info.update(
+                disk_total_mb=basis["total_mb"],
+                disk_available_mb=basis["available_mb"],
+                disk_mount=basis["mount"],
+                disk_basis="vm_disks" if "vm_disks" in basis["roles"] else "workdir",
+                disks=list(disks.values()),
+            )
+        except (KeyError, ValueError, StopIteration) as e:
             raise HostInspectError(f"호스트 조회 결과를 해석하지 못했습니다: {e!r}") from e
 
         info["vagrant_version"] = values.get("VAGRANT") or None

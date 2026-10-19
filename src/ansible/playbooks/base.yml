@@ -1,35 +1,14 @@
 ---
-# ansible-core 2.17 부터 대상에 Python 3.8 이상이 필요하다. Rocky/RHEL 8 의 기본 Python(platform-python)은 3.6 이라
-# fact 수집부터 실패하므로, Python 없이 실행되는 raw 로 python3.11 을 먼저 설치하고 그것을 쓰게 한다.
-- name: "Python 준비 (Rocky/RHEL 8)"
-  hosts: all
-  become: yes
-  gather_facts: no
-  tasks:
-    - name: "RHEL 8 계열이면 python3.11 설치"
-      raw: |
-        if grep -qE 'release 8(\.|$| )' /etc/redhat-release 2>/dev/null; then
-          echo "el8"
-          command -v python3.11 >/dev/null 2>&1 || { dnf -y -q install python3.11 >/dev/null && echo "installed"; }
-        fi
-      register: py_prepare
-      changed_when: "'installed' in py_prepare.stdout"
+# Rocky/RHEL 8 은 python3.11 을 먼저 준비한다 (prepare_python.yml 참고).
+- import_playbook: prepare_python.yml
 
-    # set_fact 는 MCP 서버(제어 노드)에서 실행되므로 대상의 Python 이 없어도 된다. 다음 play 에도 이어진다.
-    - name: "RHEL 8 계열은 python3.11 사용"
-      set_fact:
-        ansible_python_interpreter: /usr/bin/python3.11
-      when: "'el8' in py_prepare.stdout"
-
-- name: "샌드박스 서버 기초 환경 설정"
+- name: "서버 기초 환경 설정"
   hosts: all
-  become: yes
+  become: yes #sudo로 실행 
   gather_facts: yes
 
   # Debian/Ubuntu(apt) 와 RedHat 계열(Rocky, dnf)을 지원한다.
   pre_tasks:
-    # IP 로 접속하므로, 그 IP 를 다른 장비가 쓰고 있으면(IP 충돌) 엉뚱한 머신을 설정하게 된다.
-    # Vagrantfile 이 hostname 을 VM 이름으로 정하므로, 다르면 아무것도 바꾸지 않고 멈춘다.
     - name: "대상 VM 확인 (IP 충돌 방지)"
       assert:
         that: ansible_facts['hostname'] == mcp_target_name
@@ -46,6 +25,11 @@
         fail_msg: "base.yml 은 Debian/Ubuntu, RedHat(Rocky) 계열만 지원합니다 (현재: {{ ansible_facts['distribution'] }})."
 
   tasks:
+    # ---------- 디스크 ----------
+    # flavor 의 디스크 크기로 커진 디스크를 쓸 수 있게 root 를 늘린다. 패키지 업그레이드보다 먼저 한다.
+    - name: "root 디스크 늘리기"
+      include_tasks: tasks/grow_root.yml
+
     # ---------- 패키지 ----------
     - name: "APT 캐시 업데이트"
       apt:
@@ -131,7 +115,6 @@
       when: ansible_facts['os_family'] == "RedHat"
 
     # ---------- SSH 비밀번호 로그인 (내부망 테스트/시연용, group_vars 의 ssh_password_auth) ----------
-    # 브리지 네트워크라 같은 LAN 에서 누구나 접속을 시도할 수 있다. 외부에 노출되는 망에서는 끈다.
     - name: "vagrant 계정 비밀번호 설정"
       command: chpasswd
       args:
@@ -141,7 +124,6 @@
       when: ssh_password_auth | bool
 
     # 'PasswordAuthentication no' 를 yes 로 바꾼다. Ubuntu box 는 본문이 아니라 sshd_config.d/60-cloudimg-settings.conf 에 no 가 있다.
-    # no 가 없는 OS(Rocky 등)는 기본값이 yes 라 바꿀 것이 없다.
     - name: "SSH 비밀번호 로그인 허용 (PasswordAuthentication no -> yes)"
       shell: |
         shopt -s nullglob

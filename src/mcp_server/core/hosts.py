@@ -34,6 +34,8 @@ class VagrantHost:
     scan_root: str = ""
     # VM 의 기본 경로로 쓸 bridge 네트워크의 게이트웨이. 없으면 Vagrant 기본값(NAT)이라 다른 대역(VPN 등)에서 접속되지 않는다.
     gateway: Optional[str] = None
+    # VM 디스크(.vdi/.vmdk)가 생기는 폴더. 없으면 VirtualBox 의 Default machine folder 를 조회해서 쓴다. (디스크 여유 확인 기준)
+    vm_disk_path: Optional[str] = None
 
 def _ip_pool(entry: Dict[str, Any]) -> List[str]:
     specs = entry.get("ip_ranges") or entry.get("ip_range") or []
@@ -63,6 +65,7 @@ def _entries_from_env() -> List[Dict[str, Any]]:
             "bridge": os.getenv("VAGRANT_BRIDGE") or None,
             "scan_root": os.getenv("VAGRANT_SCAN_ROOT") or None,
             "gateway": os.getenv("VAGRANT_GATEWAY") or None,
+            "vm_disk_path": os.getenv("VAGRANT_VM_DISK_PATH") or None,
         }]
 
     try:
@@ -133,6 +136,7 @@ def load_hosts() -> Dict[str, VagrantHost]:
             default_project=default_project,
             scan_root=scan_root,
             gateway=gateway,
+            vm_disk_path=(str(entry.get("vm_disk_path") or "").rstrip("/") or None),
         )
 
         # 응답(오류 메시지 등)에서 이 호스트의 주소, 경로, 계정명을 가리기 위해 등록한다.
