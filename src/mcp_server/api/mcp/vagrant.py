@@ -17,14 +17,16 @@ vg_vm = ProvisionerRegistry.get_provisioner(CloudProvider.VAGRANT, "vm")
     "Vagrant(VirtualBox)로 VM을 1개 생성하고 기초 환경을 구성하는 도구이다.\n"
     "생성은 백그라운드에서 진행되며 수 분이 걸린다. 진행 상태는 vg_get_vm 또는 vg_list_vm 을 다시 호출해 확인한다 (이 도구의 응답은 시작 시점의 정보다).\n"
     "규칙:\n"
-    "1. 필수는 name(소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, image=ubuntu-22.04, project=호스트 기본 프로젝트.\n"
+    "1. 필수는 name(VM 의 hostname, 소문자/숫자/하이픈, 전체에서 유일)뿐이다. 나머지는 사용자가 말하지 않았으면 되묻지 말고 비워서 바로 호출한다. 기본값: flavor=small, purpose=dev, image=ubuntu-22.04, project=호스트 기본 프로젝트.\n"
+    "   사용자가 name 을 말하지 않았으면 name(hostname) 하나만 묻는다. 이때 flavor, image, cpu, host 등 다른 값은 함께 묻지 않고, "
+    "name 을 받으면 기본값으로 바로 호출한다. (다른 값은 사용자가 먼저 말했을 때만 넣는다)\n"
     "   image 는 ubuntu-22.04, rocky-8, rocky-9 중 하나다 (사용자가 Rocky/CentOS 계열을 원하면 rocky-9).\n"
-    "   cpu 는 사용자가 vCPU 개수를 말했을 때만 넣는다 (flavor 의 vCPU 대신 쓰이고, 메모리는 flavor 로 정해진다).\n"
+    "   cpu, memory_gb, disk_gb 는 사용자가 그 값을 말했을 때만 넣는다 (그 항목만 flavor 값 대신 쓰인다. 예: 'small 인데 메모리 8GB' 면 flavor=small, memory_gb=8).\n"
     "   dir_name 은 사용자가 VM 폴더 이름을 말했을 때만 넣는다 (비우면 vg-<name>). 이미 있는 폴더면 이유가 오류로 오니 다른 이름을 받는다.\n"
     "2. host 는 사용자가 호스트를 말했을 때만 넣는다. 비우면 ip 가 속한 호스트, 그다음 서버의 기본 호스트에 만든다. "
     "기본 호스트가 없어 오류가 오면 그 '사용 가능' 목록으로 한 번만 묻는다.\n"
     "3. 여러 대를 만들려면 반복 호출한다. 값을 지어내지 않는다.\n"
-    "4. 호스트 자원이 부족하면 이유와 가능한 사양이 오류로 온다. 그대로 전하고 더 작은 사양이나 다른 호스트를 제안한다.\n"
+    "4. 호스트 자원이 부족하면 이유와 지금 쓸 수 있는 최대값이 오류로 온다. 그대로 전하고 더 작은 값이나 다른 호스트를 제안한다.\n"
     "5. ip 는 사용자가 특정 IP 를 말했을 때만 넣는다. 전체 IP 또는 끝자리(예: 75)를 넣을 수 있다. "
     "사용자 메시지의 IP 가 가려져 보이면(마스킹) 지어내지 말고 끝자리를 물어본다. "
     "호스트 IP 대역 안의 IP 만 쓸 수 있고, 대역 밖이거나 사용 중이면 이유(와 대역)가 오류로 온다. "
@@ -48,12 +50,13 @@ async def vg_check_ip(
     return await vg_vm.check_ip(host=host, ip=ip)
 
 @router.post("/vg_update_vm", operation_id="vg_update_vm", description=(
-    "기존에 생성된 Vagrant VM의 설정(사양, vCPU, 용도)을 변경하는 도구이다. 실행 중인 VM은 재시작(vagrant reload)된다.\n"
+    "기존에 생성된 Vagrant VM의 설정(사양, vCPU, 메모리, 디스크, 용도)을 변경하는 도구이다. 실행 중인 VM은 재시작(vagrant reload)된다.\n"
     "이 도구는 사용 시 다음 규칙을 준수해야 한다.\n"
     "1. 반드시 업데이트할 대상 VM의 정확한 name 파라미터를 포함해야 한다.\n"
-    "2. flavor(사양), cpu(vCPU 수), purpose(용도) 중 변경하려는 파라미터만 포함하여 전달한다. 빠진 값은 기존 값을 유지한다.\n"
+    "2. flavor(사양), cpu(vCPU 수), memory_gb(메모리), disk_gb(디스크), purpose(용도) 중 변경하려는 파라미터만 포함하여 전달한다. 빠진 값은 기존 값을 유지한다.\n"
     "3. VM이 재시작되므로 호출 전에 사용자에게 확인을 받는다.\n"
-    "4. flavor 를 키우면 디스크도 그 flavor 크기로 늘어난다(VM 안의 파티션까지 늘린다). 디스크는 줄일 수 없어서 작은 flavor 로 바꿔도 디스크는 그대로이니 사용자에게 알린다."
+    "4. 디스크는 늘어나기만 한다(VM 안의 파티션까지 늘린다). 작은 flavor 로 바꿔도 디스크는 그대로이니 사용자에게 알린다. disk_gb 를 현재보다 작게 주면 오류가 온다.\n"
+    "5. 늘리는 양만큼 호스트 여유를 확인한다. 부족하면 이유와 지금 쓸 수 있는 최대값이 오류로 오니 그대로 전한다."
 ))
 async def vg_update_vm(params: VagrantVMUpdateInput):
     return await vg_vm.update(params)
@@ -70,8 +73,10 @@ async def vg_destroy_vm(params: VagrantVMDestroyInput):
     "Vagrant 호스트 목록과 각 호스트의 자원 현황을 조회하는 도구이다. (읽기 전용, SSH 로 조회하므로 수 초 걸린다)\n"
     "사용자가 호스트 상태를 묻거나 어느 호스트에 만들지 고를 때만 호출한다. VM 생성 전에 매번 호출하지 않는다.\n"
     "호스트마다 CPU, 메모리/디스크(사용자에게는 *_gi 로 보여준다), vbox_*(실행 중인 VM 전체 합계), managed_vms(이 서버가 만든 VM 수), "
-    "disk_* 는 VM 디스크가 생기는 파일시스템(disk_mount, disk_basis=vm_disks) 기준이고, disks 에 용도별(vm_disks: VM 디스크, workdir: Vagrantfile, boxes: box 캐시, root: /) 마운트와 여유가 있다. "
-    "디스크 용량을 말할 때는 disk_mount 를 함께 전한다. "
+    "disks 는 호스트의 로컬 파일시스템 전체(마운트별 전체/여유, roles: vm_disks=VM 디스크가 생기는 곳, workdir, boxes, root)이고 "
+    "disks_*_gi 가 그 합계다. disk_* 는 VM 디스크가 생기는 파일시스템(disk_mount) 하나의 값으로, 생성 전 자원 확인 기준이다. "
+    "디스크를 말할 때는 disks 의 모든 마운트를 '/ 279 GB, /data1 702 GB (합산 981 GB)' 처럼 마운트별 여유와 합계로 보여주고, "
+    "VM 디스크가 생기는 마운트를 함께 표시한다. "
     "ip_available(남은 IP 수), ip_used_by_others(대역 안을 이 서버가 만들지 않은 VM 이 쓰는 수)가 있고, 접속 실패는 reachable=false 와 error 로 온다.\n"
     "호스트에 있는 VM 하나하나를 보려면 vg_list_host_vms 를 쓴다."
 ))

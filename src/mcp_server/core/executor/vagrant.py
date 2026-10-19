@@ -5,7 +5,7 @@ import logging
 import re
 import shlex
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -56,6 +56,10 @@ true
 # Vagrantfile 의 config.vm.disk(디스크 크기)는 Vagrant 실험 기능이라 켜 둔다. 호스트에 이미 설정된 값이 있으면 뒤에 붙인다.
 _EXPERIMENTAL = 'export VAGRANT_EXPERIMENTAL="${VAGRANT_EXPERIMENTAL:+$VAGRANT_EXPERIMENTAL,}disks"'
 
+# 호스트 디스크 목록에서 뺄 마운트 (부팅/시스템/컨테이너 영역)와 최소 크기(MiB)
+_SKIP_MOUNTS = ("/boot", "/snap", "/run", "/dev", "/sys", "/proc", "/var/lib/docker", "/var/lib/containers", "/var/lib/kubelet")
+_MIN_LISTED_DISK_MB = 10240
+
 # 호스트의 CPU/메모리/디스크 여유와 VirtualBox 에서 실행 중인 VM 의 할당 합계를 KEY=값 으로 출력한다.
 # 디스크는 용도별로 본다. VM 디스크(.vdi/.vmdk)는 workdir 가 아니라 VirtualBox 의 Default machine folder 에 생기므로
 # 그 폴더(VMDIR, 설정값이 없으면 VBoxManage 로 확인)의 파일시스템이 VM 용량 기준이다.
@@ -81,6 +85,13 @@ fi
 [ -n "$VMDIR" ] && disk "$VMDIR" VM
 disk "${VAGRANT_HOME:-$HOME/.vagrant.d}" BOX
 disk / ROOT
+# 호스트의 로컬 파일시스템 전체 (FS=전체MiB|여유MiB|장치|마운트). 가상 FS 는 빼고, 나머지 걸러내기는 서버에서 한다.
+df -P -m -l -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x vfat 2>/dev/null | awk 'NR>1 {
+  n=split($0, f, /[ \t]+/); for (i=n-4; i>=2; i--) if (f[i+3] ~ /%$/) {
+    d=f[1]; for (j=2; j<i; j++) d=d" "f[j]; m=f[i+4]; for (j=i+5; j<=n; j++) m=m" "f[j]
+    print "FS="f[i]"|"f[i+2]"|"d"|"m; break
+  }
+}'
 if command -v vagrant >/dev/null 2>&1; then echo "VAGRANT=$(vagrant --version 2>/dev/null </dev/null | head -n1)"; fi
 if command -v VBoxManage >/dev/null 2>&1; then
   echo "VBOX=$(VBoxManage --version 2>/dev/null </dev/null | head -n1)"
@@ -562,10 +573,17 @@ class VagrantExecutor(InfraExecutor):
             raise HostInspectError(f"호스트 조회 실패 (exit={result.exit_code}): {redact_text(result.stderr.strip())[:200]}")
 
         values: Dict[str, str] = {}
+        filesystems: List[Tuple[int, int, str, str]] = []
         for line in result.stdout.splitlines():
             key, sep, value = line.partition("=")
-            if sep:
-                values[key.strip()] = value.strip()
+            if not sep:
+                continue
+            if key == "FS":
+                parts = value.split("|", 3)
+                if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit():
+                    filesystems.append((int(parts[0]), int(parts[1]), parts[2], parts[3]))
+                continue
+            values[key.strip()] = value.strip()
 
         try:
             cpu_total = int(values["CPU_TOTAL"])
@@ -578,25 +596,38 @@ class VagrantExecutor(InfraExecutor):
                 "mem_total_mb": int(values["MEM_TOTAL"]),
                 "mem_available_mb": int(values["MEM_AVAIL"]),
             }
+            # 키: 실제 마운트 경로 (응답에는 가린 값을 쓴다)
             disks: Dict[str, Dict[str, Any]] = {}
-            # root(/)는 다른 용도와 같은 파일시스템이어도 항상 목록에 나오도록 함께 잰다.
+            seen_devices = set()
+            # 1) 호스트의 로컬 파일시스템 전체. 부팅/시스템 영역과 작은 파티션은 빼고, 같은 장치(bind mount)는 한 번만 센다.
+            for total, avail, device, mount in sorted(filesystems, key=lambda fs: (len(fs[3]), fs[3])):
+                if total < _MIN_LISTED_DISK_MB or any(mount == p or mount.startswith(p + "/") for p in _SKIP_MOUNTS):
+                    continue
+                if device in seen_devices:
+                    continue
+                seen_devices.add(device)
+                disks[mount] = {"mount": redact_text(mount), "roles": [], "total_mb": total, "available_mb": avail}
+            # 2) 용도별 위치를 표시한다. (1) 에 없는 마운트면 추가한다.
             for prefix, role in (("VM", "vm_disks"), ("WD", "workdir"), ("BOX", "boxes"), ("ROOT", "root")):
                 if f"{prefix}_TOTAL" not in values:
                     continue
                 mount = values.get(f"{prefix}_MOUNT") or "?"
-                # 같은 파일시스템이면 한 항목으로 합친다.
                 disks.setdefault(mount, {
                     "mount": redact_text(mount), "roles": [],
                     "total_mb": int(values[f"{prefix}_TOTAL"]), "available_mb": int(values[f"{prefix}_AVAIL"]),
                 })["roles"].append(role)
             # VM 디스크 폴더를 찾지 못하면(VirtualBox 없음 등) workdir 의 디스크로 판단한다.
             basis = next(d for d in disks.values() if ("vm_disks" in d["roles"] or "workdir" in d["roles"]))
+            listed = sorted(disks.values(), key=lambda d: (d["mount"] != "/", d["mount"]))
             info.update(
                 disk_total_mb=basis["total_mb"],
                 disk_available_mb=basis["available_mb"],
                 disk_mount=basis["mount"],
                 disk_basis="vm_disks" if "vm_disks" in basis["roles"] else "workdir",
-                disks=list(disks.values()),
+                disks=listed,
+                # 목록에 나온 파일시스템 전체의 합계
+                disks_total_mb=sum(d["total_mb"] for d in listed),
+                disks_available_mb=sum(d["available_mb"] for d in listed),
             )
         except (KeyError, ValueError, StopIteration) as e:
             raise HostInspectError(f"호스트 조회 결과를 해석하지 못했습니다: {e!r}") from e
